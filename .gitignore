@@ -1,0 +1,10 @@
+# Ignore sensitive files
+config.json
+client_secret.apps.googleusercontent.com.json
+token.json
+
+# Ignore virtual environment (if you create one)
+yt_env/
+__pycache__/
+*.pyc
+.DS_Store
