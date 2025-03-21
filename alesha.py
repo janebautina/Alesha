@@ -4,21 +4,19 @@ import time
 from langdetect import detect
 import deepl
 import os
-import openai
 import json
+from openai import OpenAI
+from openai import OpenAIError
 
 # Load config
 with open("config.json") as f:
     config = json.load(f)
-
-# Initialize API Clients
-translator = deepl.Translator(config["DEEPL_API_KEY"])
-
-# Initialize OpenAI Client (New format)
-openai_client =  os.environ.get("OPENAI_API_KEY")
-last_request_time = 0  # Prevents OpenAI 429 rate limits
-
 SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+# Initialize API Clients
+translator = deepl.Translator(config["DEEPL_API_KEY"], server_url="https://api-free.deepl.com")
+# Initialize OpenAI Client (New format)
+client = OpenAI(api_key=config["OPENAI_API_KEY"])
+last_request_time = 0  # Prevents OpenAI 429 rate limits
 
 LIVE_CHAT_ID = None
 LIVE_STREAM_ID = None
@@ -137,41 +135,48 @@ def send_message_to_chat(message):
     request.execute()
 
 def generate_ai_response(message, language):
+    import openai
     """Generate an AI-based response in both the original language and Russian."""
-    
     global last_request_time
 
     try:
         # Enforce a small delay to avoid OpenAI rate limits
         time_since_last_request = time.time() - last_request_time
-        if time_since_last_request < 2:  # Ensures at least 2 seconds between requests
+        if time_since_last_request < 2:
             time.sleep(2 - time_since_last_request)
 
-        # Construct AI prompt
-        messages = [
-            {"role": "system", "content": "You are a helpful AI assisting users in YouTube live chat."},
-            {"role": "user", "content": f"User said: {message}. Generate a relevant and concise response."}
-        ]
-
-        # Corrected OpenAI API Call (Version 0.28.0)
-        response = openai.ChatCompletion.create(
+        # Construct messages in new format
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=messages
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assisting users in YouTube live chat."},
+                {"role": "user", "content": f"User said: {message}. Generate a relevant and concise response."}
+            ]
         )
 
-        ai_response = response["choices"][0]["message"]["content"].strip()
-
-        # Update last request time to avoid API spam
+        ai_response = response.choices[0].message.content.strip()
         last_request_time = time.time()
 
         # Translate AI response to Russian
         ai_response_ru = translator.translate_text(ai_response, target_lang="RU").text
 
-        # Translate AI response back to the original language (if needed)
-        if language != "ru":
-            ai_response_original = translator.translate_text(ai_response, target_lang=language.upper()).text
+        # Convert DeepL-compatible language code (e.g., en -> EN-US)
+        language_mapping = {
+            "en": "EN-US",
+            "fr": "FR",
+            "es": "ES",
+            "de": "DE",
+            "it": "IT",
+            "nl": "NL",
+            "ru": "RU"
+        }
+        deepl_lang = language_mapping.get(language.lower(), "EN-US")
+
+        # Translate AI response back to original language if not Russian
+        if language.lower() != "ru":
+            ai_response_original = translator.translate_text(ai_response, target_lang=deepl_lang).text
         else:
-            ai_response_original = ai_response  # No need to translate if it's already Russian
+            ai_response_original = ai_response
 
         return ai_response_original, ai_response_ru
 

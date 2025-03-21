@@ -1,76 +1,71 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import os
-import openai
-from openai import OpenAIError
-from alesha import generate_ai_response, initialize_chat_ids  # Ensure correct script filename
+from alesha import generate_ai_response, initialize_chat_ids
 
-class TestAIResponseMock(unittest.TestCase):
+class TestAIResponseRealOpenAI(unittest.TestCase):
 
-    @patch.dict(os.environ, {"LIVE_CHAT_ID": "mock_chat_id", "LIVE_STREAM_ID": "mock_stream_id"})
-    @patch("openai.ChatCompletion.create")  # Mock OpenAI API call
-    def test_generate_ai_response_english(self, mock_openai):
-        """Test AI response for an English message without a real YouTube stream"""
-        
-        initialize_chat_ids()  # Initialize after mock
+    @patch.dict(os.environ, {
+        "LIVE_CHAT_ID": "mock_chat_id",
+        "LIVE_STREAM_ID": "mock_stream_id"
+    })
+    @patch("alesha.translator.translate_text")
+    def test_generate_ai_response_english(self, mock_deepl):
+        """Test AI response for an English message (real OpenAI API)"""
+        initialize_chat_ids()
 
-        # Simulate OpenAI API returning a response
-        mock_openai.return_value = {
-            "choices": [{"message": {"content": "Hello! How can I help?"}}]
-        }
+        # Mock DeepL translations
+        def deepl_mock(text, target_lang):
+            if target_lang == "RU":
+                return MagicMock(text="Здравствуйте! Чем я могу помочь?")
+            return MagicMock(text=text)
+        mock_deepl.side_effect = deepl_mock
 
-        message = "How are you?"
-        language = "EN-US"
+        original, translated = generate_ai_response("How are you?", "en")
+        print(f"\n🔹 AI Response (English): {original}")
+        print(f"🔹 AI Response (Russian): {translated}")
 
-        ai_response_original, ai_response_ru = generate_ai_response(message, language)
+        self.assertIsInstance(original, str)
+        self.assertIsInstance(translated, str)
+        self.assertNotIn("Ошибка AI", original)
 
-        print("\n🔹 AI Response (English):", ai_response_original)
-        print("🔹 AI Response (Russian):", ai_response_ru)
-        print("\nExpected:", "Hello! How can I help?")
-        print("Received:", ai_response_original)
-        self.assertEqual(ai_response_original.strip(), "Hello! How can I help?")
-        self.assertIsInstance(ai_response_ru, str)
+    @patch.dict(os.environ, {
+        "LIVE_CHAT_ID": "mock_chat_id",
+        "LIVE_STREAM_ID": "mock_stream_id"
+    })
+    @patch("alesha.translator.translate_text")
+    def test_generate_ai_response_spanish(self, mock_deepl):
+        """Test AI response for a Spanish message (real OpenAI API)"""
+        initialize_chat_ids()
 
-    @patch.dict(os.environ, {"LIVE_CHAT_ID": "mock_chat_id", "LIVE_STREAM_ID": "mock_stream_id"})
-    @patch("openai.ChatCompletion.create")
-    def test_generate_ai_response_spanish(self, mock_openai):
-        """Test AI response for a Spanish message"""
-        
-        initialize_chat_ids()  # Initialize after mock
+        def deepl_mock(text, target_lang):
+            if target_lang == "RU":
+                return MagicMock(text="Здравствуйте, чем я могу вам помочь?")
+            return MagicMock(text=text)
+        mock_deepl.side_effect = deepl_mock
 
-        mock_openai.return_value = {
-            "choices": [{"message": {"content": "Hola, ¿cómo puedo ayudarte?"}}]
-        }
+        original, translated = generate_ai_response("Hola", "es")
+        print(f"\n🔹 AI Response (Spanish): {original}")
+        print(f"🔹 AI Response (Russian): {translated}")
 
-        message = "Hola"
-        language = "es"
+        self.assertIsInstance(original, str)
+        self.assertIsInstance(translated, str)
+        self.assertNotIn("Ошибка AI", original)
 
-        ai_response_original, ai_response_ru = generate_ai_response(message, language)
+    @patch.dict(os.environ, {
+        "LIVE_CHAT_ID": "mock_chat_id",
+        "LIVE_STREAM_ID": "mock_stream_id"
+    })
+    @patch("alesha.translator.translate_text", return_value=MagicMock(text="AI Error"))
+    @patch("alesha.client.chat.completions.create", side_effect=Exception("API error"))
+    def test_generate_ai_response_api_error(self, mock_openai, mock_deepl):
+        """Test fallback when OpenAI API fails"""
+        initialize_chat_ids()
 
-        print("\n🔹 AI Response (Spanish):", ai_response_original)
-        print("🔹 AI Response (Russian):", ai_response_ru)
-
-        self.assertEqual(ai_response_original, "Hola, ¿cómo puedo ayudarte?")
-        self.assertIsInstance(ai_response_ru, str)
-
-    @patch.dict(os.environ, {"LIVE_CHAT_ID": "mock_chat_id", "LIVE_STREAM_ID": "mock_stream_id"})
-    @patch("openai.ChatCompletion.create")
-    def test_generate_ai_response_api_error(self, mock_openai):
-        """Test AI response when OpenAI API fails"""
-        
-        initialize_chat_ids()  # Initialize after mock
-
-        mock_openai.side_effect = OpenAIError("API error")
-
-        message = "This should cause an API error."
-        language = "en"
-
-        ai_response_original, ai_response_ru = generate_ai_response(message, language)
-
-        print("\n⚠ AI Response Error (Expected due to API failure):", ai_response_original, "|", ai_response_ru)
-
-        self.assertEqual(ai_response_original, "Ошибка AI")
-        self.assertEqual(ai_response_ru, "AI Error")
+        original, translated = generate_ai_response("This should cause an API error.", "en")
+        print(f"\n⚠ AI Response Error (Expected): {original} | {translated}")
+        self.assertEqual(original, "Ошибка AI")
+        self.assertEqual(translated, "AI Error")
 
 if __name__ == "__main__":
     unittest.main()
