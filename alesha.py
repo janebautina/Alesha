@@ -135,7 +135,6 @@ def send_message_to_chat(message):
     request.execute()
 
 def generate_ai_response(message, language):
-    import openai
     """Generate an AI-based response in both the original language and Russian."""
     global last_request_time
 
@@ -197,7 +196,6 @@ def main():
             if original_msg not in processed_messages:
                 # Send AI-generated responses back to the chat
                 send_message_to_chat(f"💬 AI Reply: {ai_response_original} | {ai_response_ru}")
-                
                 processed_messages.add(original_msg)
         
         time.sleep(5)  # Prevents excessive API calls
