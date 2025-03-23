@@ -120,19 +120,23 @@ def translate_message(message, source_language):
 
 def send_message_to_chat(message):
     """Send a message back to the YouTube live chat."""
-    request = youtube.liveChatMessages().insert(
-        part="snippet",
-        body={
-            "snippet": {
-                "liveChatId": LIVE_CHAT_ID,
-                "type": "textMessageEvent",
-                "textMessageDetails": {
-                    "messageText": message
+    try:
+        request = youtube.liveChatMessages().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "liveChatId": LIVE_CHAT_ID,
+                    "type": "textMessageEvent",
+                    "textMessageDetails": {
+                        "messageText": message
+                    }
                 }
             }
-        }
-    )
-    request.execute()
+        )
+        request.execute()
+        print(f"✅ Sent message: {message}")
+    except Exception as e:
+        print(f"⚠ Failed to send message to chat: {e}")
 
 def generate_ai_response(message, language):
     """Generate an AI-based response in both the original language and Russian."""
