@@ -33,7 +33,6 @@ def initialize_chat_ids():
     if not LIVE_STREAM_ID:
         raise ValueError("❌ ERROR: LIVE_STREAM_ID is not set. Make sure `get_live_chat_id.py` is fetching it correctly.")
 
-
 def get_authenticated_service():
     """Authenticate and return the YouTube API service."""
     creds = Credentials.from_authorized_user_file(config["TOKEN_FILE"], SCOPES)
@@ -62,24 +61,30 @@ def get_live_chat_messages():
     for item in response.get("items", []):
         message = item["snippet"].get("displayMessage", "[Non-text message]")
         author = item["authorDetails"]["displayName"]
-        
+
         # Detect language
         detected_lang = detect_language(message)
 
         # Only process messages that are NOT in Russian
-        if detected_lang != "ru":
+        if detected_lang == "ru":
+            print(f"⏭️ Skipped Russian message from {author}: '{message}'")
+            continue
+
+        try:
             # Translate message
             translated_msg, _ = translate_message(message, detected_lang)
 
             # Generate AI Response
             ai_response_original, ai_response_ru = generate_ai_response(message, detected_lang)
 
-            # Send messages back to chat
-            send_message_to_chat(f"📝 {author}: {translated_msg}")
+            # Send only the AI response to the chat
             send_message_to_chat(f"💬 AI Reply: {ai_response_original} | {ai_response_ru}")
 
             # Add to processed messages list
             messages.append((author, message, translated_msg, ai_response_original, ai_response_ru, detected_lang))
+
+        except Exception as e:
+            print(f"⚠ Error handling message from {author}: {e}")
 
     return messages  # Returns only processed (non-Russian) messages
 
@@ -116,7 +121,6 @@ def translate_message(message, source_language):
     except Exception as e:
         print(f"⚠ Translation Error: {e}")
         return message, message  # Return original message if translation fails
-
 
 def send_message_to_chat(message):
     """Send a message back to the YouTube live chat."""
@@ -198,10 +202,8 @@ def main():
 
         for author, original_msg, translated_msg, ai_response_original, ai_response_ru, detected_lang in messages:
             if original_msg not in processed_messages:
-                # Send AI-generated responses back to the chat
-                send_message_to_chat(f"💬 AI Reply: {ai_response_original} | {ai_response_ru}")
                 processed_messages.add(original_msg)
-        
+
         time.sleep(5)  # Prevents excessive API calls
 
 if __name__ == "__main__":
