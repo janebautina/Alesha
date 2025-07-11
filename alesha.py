@@ -8,6 +8,10 @@ import json
 from openai import OpenAI
 from openai import OpenAIError
 from collections import deque
+import asyncio
+import websockets
+import threading
+from ws_server import broadcast_message
 
 # Load config
 with open("config.json") as f:
@@ -23,12 +27,39 @@ client = OpenAI(api_key=config["OPENAI_API_KEY"])
 
 # Global state
 last_request_time = 0
-last_bot_post_time = 0  # ⏱ Controls AI reply frequency
+last_bot_post_time = 0
 processed_message_ids = deque(maxlen=MAX_TRACKED_MESSAGES)
 processed_message_ids_set = set()
 next_page_token = None
 LIVE_CHAT_ID = None
 LIVE_STREAM_ID = None
+connected_clients = set()
+
+# WebSocket broadcasting
+async def broadcast_to_clients(message):
+    if not connected_clients:
+        return
+    msg_json = json.dumps(message)
+    await asyncio.gather(*(ws.send(msg_json) for ws in connected_clients))
+
+async def websocket_handler(websocket, path):
+    connected_clients.add(websocket)
+    try:
+        async for _ in websocket:
+            pass
+    finally:
+        connected_clients.remove(websocket)
+
+def start_websocket_server():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    start_server = websockets.serve(websocket_handler, "localhost", 8765)
+    loop.run_until_complete(start_server)
+    print("🌐 WebSocket server started on ws://localhost:8765")
+    loop.run_forever()
+
+def start_background_services():
+    threading.Thread(target=start_websocket_server, daemon=True).start()
 
 def initialize_chat_ids():
     global LIVE_CHAT_ID, LIVE_STREAM_ID
@@ -55,8 +86,6 @@ def detect_language(text):
 def get_live_chat_messages():
     global next_page_token, processed_message_ids, processed_message_ids_set
     global last_bot_post_time
-
-    messages = []
 
     try:
         request = youtube.liveChatMessages().list(
@@ -100,7 +129,14 @@ def get_live_chat_messages():
                 send_message_to_chat(f"💬 AI Reply: {ai_response_original} | {ai_response_ru}")
                 last_bot_post_time = now
 
-                messages.append((msg_id, author, message, translated_msg, ai_response_original, ai_response_ru, detected_lang))
+                msg_payload = {
+                    "id": msg_id,
+                    "author": author,
+                    "content": ai_response_original,
+                    "language": detected_lang
+                }
+                #asyncio.run(broadcast_to_clients(msg_payload))
+                asyncio.create_task(broadcast_message(msg_payload))
 
             except Exception as e:
                 print(f"⚠ Error handling message from {author}: {e}")
@@ -110,8 +146,6 @@ def get_live_chat_messages():
     except Exception as e:
         print(f"⚠ API Error while fetching messages: {e}")
         time.sleep(5)
-
-    return messages
 
 def translate_message(message, source_language):
     language_mapping = {
@@ -175,11 +209,10 @@ def generate_ai_response(message, language):
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a friendly assistant in a live YouTube chat. "
-                        "Reply briefly, clearly, and helpfully in the same language the user spoke. "
-                        "Limit your reply to a maximum of 200 characters. Avoid repeating the user's question."
-                    )
+                    "content": ( "You are Alesha — a beautiful, sexy, and brilliant woman with deep knowledge of psychology. "
+                                "You're confident, charming, and irresistible. "
+                                "Reply briefly, clearly, and helpfully in the same language the user spoke. "
+                                "Keep replies under 100 characters. Never repeat the user's message.")
                 },
                 {
                     "role": "user",
@@ -216,6 +249,7 @@ def generate_ai_response(message, language):
 def main():
     print("🚀 YouTube Live Chat Translator Bot is running...")
     initialize_chat_ids()
+    start_background_services()
     while True:
         get_live_chat_messages()
 
