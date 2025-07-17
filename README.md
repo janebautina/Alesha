@@ -70,7 +70,13 @@ Create a `config.json` file with this structure (do **not** commit it):
 {
   "DEEPL_API_KEY": "your_deepl_api_key_here",
   "OPENAI_API_KEY": "your_openai_api_key_here",
-  "TOKEN_FILE": "token.json"
+  "TOKEN_FILE": "token.json",
+  "YOUTUBE_CLIENT_SECRET": "client_secret...",
+  "TOKEN_FILE": "token",
+  "YOUTUBE_API_KEY": "AzaSy...",
+  "SUPABASE_URL": "https://your-project.com",
+  "SUPABASE_KEY": "your-anon-or-service-role-key"
+
 }
 ```
 
@@ -89,13 +95,60 @@ Use the bash script to:
 ./run_alesha.sh
 ```
 
+## 🖥️ Run the Frontend UI
+
+Navigate to the web directory and start the development server:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Then open your browser and go to `http://localhost:3000`
+
+## 🔌 Start the WebSocket Server (if not embedded)
+
+Run the WebSocket server to handle real-time message broadcasting:
+
+```bash
+python3 ws_server.py
+```
+
+Runs on `ws://localhost:8765`
+
+Frontend connects here to receive messages
+
 ---
+
 
 ## 🦪 Running Tests
 
+### Test AI Response Function
 Test your AI response function (without needing a real YouTube stream):
 ```bash
 python3 test_ai_response.py
+```
+
+### Test Database Connection
+Test your Supabase database connection:
+```bash
+python3 test_supabase_standalone.py
+```
+
+**Note:** Make sure you have created the `messages` table in your Supabase database first. Run this SQL in your Supabase SQL editor:
+
+```sql
+create table if not exists messages (
+  id serial primary key,
+  message_id text unique not null,
+  author text not null,
+  content text not null,
+  language text,
+  timestamp double precision not null,
+  platform text default 'youtube',
+  created_at timestamp with time zone default now()
+);
 ```
 
 ---
