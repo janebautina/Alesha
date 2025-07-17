@@ -72,7 +72,6 @@ Create a `config.json` file with this structure (do **not** commit it):
   "OPENAI_API_KEY": "your_openai_api_key_here",
   "TOKEN_FILE": "token.json",
   "YOUTUBE_CLIENT_SECRET": "client_secret...",
-  "TOKEN_FILE": "token",
   "YOUTUBE_API_KEY": "AzaSy...",
   "SUPABASE_URL": "https://your-project.com",
   "SUPABASE_KEY": "your-anon-or-service-role-key"
