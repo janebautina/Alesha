@@ -6,12 +6,10 @@ import deepl
 import os
 import json
 from openai import OpenAI
-from openai import OpenAIError
 from collections import deque
 import asyncio
-import websockets
-import threading
-from ws_server import broadcast_message
+from ws_server import broadcast_message  # ✅ import broadcast only
+from supabase.client import create_client, Client
 
 # Load config
 with open("config.json") as f:
@@ -19,57 +17,35 @@ with open("config.json") as f:
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 MAX_TRACKED_MESSAGES = 1000
-BOT_COOLDOWN_SECONDS = 30  # ⏳ Delay between replies to avoid spam
-
-# Initialize API Clients
-translator = deepl.Translator(config["DEEPL_API_KEY"], server_url="https://api-free.deepl.com")
-client = OpenAI(api_key=config["OPENAI_API_KEY"])
-
-# Global state
-last_request_time = 0
-last_bot_post_time = 0
-processed_message_ids = deque(maxlen=MAX_TRACKED_MESSAGES)
-processed_message_ids_set = set()
-next_page_token = None
+BOT_COOLDOWN_SECONDS = 30
 LIVE_CHAT_ID = None
 LIVE_STREAM_ID = None
-connected_clients = set()
-
-# WebSocket broadcasting
-async def broadcast_to_clients(message):
-    if not connected_clients:
-        return
-    msg_json = json.dumps(message)
-    await asyncio.gather(*(ws.send(msg_json) for ws in connected_clients))
-
-async def websocket_handler(websocket, path):
-    connected_clients.add(websocket)
-    try:
-        async for _ in websocket:
-            pass
-    finally:
-        connected_clients.remove(websocket)
-
-def start_websocket_server():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    start_server = websockets.serve(websocket_handler, "localhost", 8765)
-    loop.run_until_complete(start_server)
-    print("🌐 WebSocket server started on ws://localhost:8765")
-    loop.run_forever()
-
-def start_background_services():
-    threading.Thread(target=start_websocket_server, daemon=True).start()
-
 def initialize_chat_ids():
     global LIVE_CHAT_ID, LIVE_STREAM_ID
     LIVE_CHAT_ID = os.getenv("LIVE_CHAT_ID")
     LIVE_STREAM_ID = os.getenv("LIVE_STREAM_ID")
 
     if not LIVE_CHAT_ID:
-        raise ValueError("❌ ERROR: LIVE_CHAT_ID is not set.")
+        raise ValueError("❌ LIVE_CHAT_ID not set.")
     if not LIVE_STREAM_ID:
-        raise ValueError("❌ ERROR: LIVE_STREAM_ID is not set.")
+        raise ValueError("❌ LIVE_STREAM_ID not set.")
+
+translator = deepl.Translator(config["DEEPL_API_KEY"], server_url="https://api-free.deepl.com")
+client = OpenAI(api_key=config["OPENAI_API_KEY"])
+
+# Initialize Supabase client
+try:
+    supabase: Client = create_client(config["SUPABASE_URL"], config["SUPABASE_KEY"])
+except Exception as e:
+    print(f"❌ Failed to initialize Supabase client: {e}")
+    raise
+
+last_request_time = 0
+last_bot_post_time = 0
+processed_message_ids = deque(maxlen=MAX_TRACKED_MESSAGES)
+processed_message_ids_set = set()
+next_page_token = None
+
 
 def get_authenticated_service():
     creds = Credentials.from_authorized_user_file(config["TOKEN_FILE"], SCOPES)
@@ -94,18 +70,18 @@ def get_live_chat_messages():
             pageToken=next_page_token
         )
         response = request.execute()
-
         next_page_token = response.get("nextPageToken")
         polling_interval = response.get("pollingIntervalMillis", 2000) / 1000.0
 
         for item in response.get("items", []):
             msg_id = item["id"]
-
             if msg_id in processed_message_ids_set:
                 continue
+
             if len(processed_message_ids) >= MAX_TRACKED_MESSAGES:
                 old_id = processed_message_ids.popleft()
                 processed_message_ids_set.discard(old_id)
+
             processed_message_ids.append(msg_id)
             processed_message_ids_set.add(msg_id)
 
@@ -120,7 +96,7 @@ def get_live_chat_messages():
             try:
                 now = time.time()
                 if now - last_bot_post_time < BOT_COOLDOWN_SECONDS:
-                    print("⏳ Cooldown active. Skipping reply to avoid spamming.")
+                    print("⏳ Cooldown active. Skipping.")
                     continue
 
                 translated_msg, _ = translate_message(message, detected_lang)
@@ -135,8 +111,12 @@ def get_live_chat_messages():
                     "content": ai_response_original,
                     "language": detected_lang
                 }
-                #asyncio.run(broadcast_to_clients(msg_payload))
-                asyncio.create_task(broadcast_message(msg_payload))
+
+                # Save message to Supabase
+                save_message_to_supabase(msg_payload)
+
+                print(f"📤 Broadcasting message to frontend: {msg_payload}")
+                asyncio.run(broadcast_message(msg_payload))  # ✅ Run broadcast outside any loop
 
             except Exception as e:
                 print(f"⚠ Error handling message from {author}: {e}")
@@ -144,25 +124,44 @@ def get_live_chat_messages():
         time.sleep(polling_interval)
 
     except Exception as e:
-        print(f"⚠ API Error while fetching messages: {e}")
+        print(f"⚠ API Error: {e}")
         time.sleep(5)
 
 def translate_message(message, source_language):
-    language_mapping = {
-        "en": "EN-US", "fr": "FR", "es": "ES", "de": "DE",
-        "it": "IT", "nl": "NL", "ru": "RU"
-    }
-    target_lang = language_mapping.get(source_language, "EN-US")
-
     try:
         translated_to_russian = translator.translate_text(message, target_lang="RU").text
         if source_language == "ru":
             return translated_to_russian, translated_to_russian
-        translated_back = translator.translate_text(translated_to_russian, target_lang=target_lang).text
+
+        target = {
+            "en": "EN-US", "fr": "FR", "es": "ES", "de": "DE",
+            "it": "IT", "nl": "NL", "ru": "RU"
+        }.get(source_language, "EN-US")
+
+        translated_back = translator.translate_text(translated_to_russian, target_lang=target).text
         return translated_to_russian, translated_back
     except Exception as e:
         print(f"⚠ Translation Error: {e}")
         return message, message
+
+def save_message_to_supabase(message_data):
+    """Save message data to Supabase database"""
+    try:
+        data = {
+            "message_id": message_data["id"],
+            "author": message_data["author"],
+            "content": message_data["content"],
+            "language": message_data["language"],
+            "timestamp": time.time(),
+            "platform": "youtube"
+        }
+        print("📝 Inserting into Supabase:", data)
+        result = supabase.table("messages").insert(data).execute()
+        print(f"✅ Saved message to Supabase: {message_data['id']}")
+        return result
+    except Exception as e:
+        print(f"⚠ Failed to save to Supabase: {e}")
+        return None
 
 def send_message_to_chat(message, prefix="🔴"):
     try:
@@ -172,70 +171,61 @@ def send_message_to_chat(message, prefix="🔴"):
         if len(message) > 200:
             message = message[:197] + "..."
 
-        full_message = f"{prefix} {message}"
-        print(f"💬 Sending to chat: {full_message}")
-
-        request_body = {
-            "snippet": {
-                "liveChatId": LIVE_CHAT_ID,
-                "type": "textMessageEvent",
-                "textMessageDetails": {
-                    "messageText": full_message
-                }
-            }
-        }
+        print(f"💬 Sending to chat: {prefix} {message}")
 
         youtube.liveChatMessages().insert(
             part="snippet",
-            body=request_body
+            body={
+                "snippet": {
+                    "liveChatId": LIVE_CHAT_ID,
+                    "type": "textMessageEvent",
+                    "textMessageDetails": {
+                        "messageText": f"{prefix} {message}"
+                    }
+                }
+            }
         ).execute()
 
-        print(f"✅ Sent message: {full_message}")
+        print(f"✅ Sent to YouTube chat.")
 
     except Exception as e:
-        print(f"⚠ Failed to send message to chat: {e}")
-        print(f"⚠ Request Body: {json.dumps(request_body, indent=2)}")
+        print(f"⚠ Failed to send to chat: {e}")
 
 def generate_ai_response(message, language):
     global last_request_time
-
     try:
-        time_since_last_request = time.time() - last_request_time
-        if time_since_last_request < 2:
-            time.sleep(2 - time_since_last_request)
+        if time.time() - last_request_time < 2:
+            time.sleep(2)
 
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {
                     "role": "system",
-                    "content": ( "You are Alesha — a beautiful, sexy, and brilliant woman with deep knowledge of psychology. "
-                                "You're confident, charming, and irresistible. "
-                                "Reply briefly, clearly, and helpfully in the same language the user spoke. "
-                                "Keep replies under 100 characters. Never repeat the user's message.")
+                    "content": (
+                        "You are Alesha — a beautiful, sexy, and brilliant woman with deep knowledge of psychology. "
+                        "You're confident, charming, and irresistible. "
+                        "Reply briefly, clearly, and helpfully in the same language the user spoke. "
+                        "Keep replies under 100 characters. Never repeat the user's message."
+                    )
                 },
-                {
-                    "role": "user",
-                    "content": message
-                }
+                {"role": "user", "content": message}
             ]
         )
 
         ai_response = response.choices[0].message.content.strip()
-        if len(ai_response) > 200:
-            ai_response = ai_response[:197] + "..."
+        if len(ai_response) > 100:
+            ai_response = ai_response[:97] + "..."
 
         last_request_time = time.time()
 
         ai_response_ru = translator.translate_text(ai_response, target_lang="RU").text
 
-        language_mapping = {
-            "en": "EN-US", "fr": "FR", "es": "ES", "de": "DE",
-            "it": "IT", "nl": "NL", "ru": "RU"
-        }
-        deepl_lang = language_mapping.get(language.lower(), "EN-US")
-
         if language.lower() != "ru":
+            deepl_lang = {
+                "en": "EN-US", "fr": "FR", "es": "ES", "de": "DE",
+                "it": "IT", "nl": "NL", "ru": "RU"
+            }.get(language.lower(), "EN-US")
             ai_response_original = translator.translate_text(ai_response, target_lang=deepl_lang).text
         else:
             ai_response_original = ai_response
@@ -244,12 +234,11 @@ def generate_ai_response(message, language):
 
     except Exception as e:
         print(f"⚠ AI Response Error: {e}")
-        return "Ошибка AI", "AI Error"
+        return "AI error", "Ошибка AI"
 
 def main():
-    print("🚀 YouTube Live Chat Translator Bot is running...")
+    print("🚀 Alesha is running...")
     initialize_chat_ids()
-    start_background_services()
     while True:
         get_live_chat_messages()
 

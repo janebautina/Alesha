@@ -4,7 +4,7 @@ import json
 
 connected_clients = set()
 
-async def handler(websocket):  # remove `, path`
+async def handler(websocket):  # path removed correctly
     print("🔌 New client connected")
     connected_clients.add(websocket)
     try:
@@ -18,7 +18,13 @@ async def handler(websocket):  # remove `, path`
 async def broadcast_message(message_dict):
     if connected_clients:
         message = json.dumps(message_dict)
-        await asyncio.wait([client.send(message) for client in connected_clients])
+        print(f"📡 Broadcasting to {len(connected_clients)} clients: {message}")
+        await asyncio.gather(
+            *(client.send(message) for client in connected_clients),
+            return_exceptions=True
+        )
+    else:
+        print("⚠️ No connected clients to broadcast to.")
 
 async def main():
     print("🚀 WebSocket server running on ws://localhost:8765")
