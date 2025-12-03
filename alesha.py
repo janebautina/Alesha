@@ -41,6 +41,12 @@ next_page_token = None
 message_counter = 0
 next_funny_in = random.randint(3, 5)
 
+# like counter
+seen_authors = set()
+last_like_check_time = 0
+last_like_count = None
+LIKE_CHECK_INTERVAL = 60  # сек, можно поменять
+
 LANG_NAME_MAP = {
     "en": "English",
     "ru": "Russian",
@@ -217,6 +223,82 @@ def save_message_to_supabase(message_data):
         return "AI error", "Ошибка AI"
 """
 
+def get_current_like_count():
+    """Fetch current like count for the active live stream."""
+    try:
+        if not LIVE_STREAM_ID:
+            return None
+
+        response = youtube.videos().list(
+            part="statistics",
+            id=LIVE_STREAM_ID,
+        ).execute()
+
+        items = response.get("items", [])
+        if not items:
+            return None
+
+        stats = items[0].get("statistics", {})
+        like_count = int(stats.get("likeCount", 0))
+        return like_count
+    except Exception as e:
+        print(f"⚠ Failed to fetch like count: {e}")
+        return None
+
+def generate_alesha_welcome(author_name: str, source_language: str) -> str:
+    """
+    Сгенерировать короткое приветствие для НОВОГО зрителя
+    на его языке (если известен).
+    """
+    global last_request_time
+
+    try:
+        lang_code = (source_language or "unknown").lower()
+        lang_name = LANG_NAME_MAP.get(lang_code, "Unknown language")
+
+        user_prompt = f"""
+            A new viewer has just written their first message in the livestream chat.
+            Nickname: "{author_name}"
+
+            Your task:
+            - Greet them warmly in their language (language code: {lang_code}, approx: {lang_name}).
+            - 1–2 short sentences max.
+            - Make them feel welcome and part of the community.
+            - You may address them by nickname.
+            - Do NOT say you are a bot or AI.
+            - Do NOT use phrases like "how can I help", "how may I help", "how can I be useful".
+            If language code is "unknown", reply in a fun mix of simple Russian and English.
+            """
+
+        system_prompt = get_system_prompt_for_lang(lang_code)
+
+        # Чуть меньше temperature, чтобы приветствия были мягче
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0.7,
+            max_tokens=60,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            return f"Добро пожаловать, {author_name}! 💫"
+
+        text = content.strip()
+        if len(text) > 160:
+            text = text[:157] + "..."
+
+        last_request_time = time.time()
+        return text
+
+    except Exception as e:
+        print(f"⚠ AI Welcome Error: {e}")
+        return f"Рада видеть тебя в чате, {author_name}! ✨"
+
+
 def generate_alesha_reply(
     original_message: str,
     translated_ru: str,
@@ -293,16 +375,53 @@ def generate_alesha_reply(
 
 async def fetch_and_process_messages():
     global next_page_token, last_bot_post_time, message_counter, next_funny_in
+    global last_like_check_time, last_like_count, seen_authors
+
     while True:
         try:
+            # 🔁 Периодически проверяем лайки и благодарим за новые
+            now = time.time()
+            if now - last_like_check_time > LIKE_CHECK_INTERVAL:
+                like_count = get_current_like_count()
+                last_like_check_time = now
+
+                if like_count is not None:
+                    if last_like_count is None:
+                        # первая инициализация — просто запоминаем
+                        last_like_count = like_count
+                    elif like_count > last_like_count:
+                        diff = like_count - last_like_count
+                        last_like_count = like_count
+
+                        # чуть разные тексты в зависимости от масштаба
+                        if like_count in (10, 25, 50, 100):
+                            text = (
+                                f"✨ Маленький юбилей — {like_count} лайков! "
+                                f"Вы делаете этот стрим живым, люблю вас."
+                            )
+                        elif diff == 1:
+                            text = f"💗 Вижу новый лайк, спасибо вам! Сейчас их уже {like_count}."
+                        elif diff < 5:
+                            text = f"💗 Спасибо за ваши лайки! Ещё +{diff}, теперь их {like_count}."
+                        else:
+                            text = (
+                                f"✨ Вы засыпали стрим лайками (+{diff})! "
+                                f"Уже {like_count}, я в восторге."
+                            )
+
+                        send_message_to_chat(text, prefix="💖")
+
+            # 📥 Read new messages from YouTube Live Chat
             request = youtube.liveChatMessages().list(
                 liveChatId=LIVE_CHAT_ID,
                 part="snippet,authorDetails",
-                pageToken=next_page_token
+                pageToken=next_page_token,
             )
             response = request.execute()
             next_page_token = response.get("nextPageToken")
-            polling_interval = response.get("pollingIntervalMillis", 2000) / 1000.0
+            polling_interval = response.get(
+                "pollingIntervalMillis", 2000
+            ) / 1000.0
 
             for item in response.get("items", []):
                 msg_id = item["id"]
@@ -316,16 +435,27 @@ async def fetch_and_process_messages():
                 processed_message_ids.append(msg_id)
                 processed_message_ids_set.add(msg_id)
 
-                message = item["snippet"].get("displayMessage", "[Non-text message]")
+                message = item["snippet"].get(
+                    "displayMessage", "[Non-text message]"
+                )
                 author = item["authorDetails"]["displayName"]
                 detected_lang = detect_language(message)
 
+                # 👋 New person in chat? Welcome them once
+                is_new_author = author not in seen_authors
+                if is_new_author:
+                    seen_authors.add(author)
+                    welcome_text = generate_alesha_welcome(
+                        author_name=author,
+                        source_language=detected_lang,
+                    )
+                    send_message_to_chat(welcome_text, prefix="🌟")
 
                 now = time.time()
                 if now - last_bot_post_time < BOT_COOLDOWN_SECONDS:
                     continue
 
-                 # Translate to Russian for context / logs / UI
+                # Translate to Russian for context / logs / UI
                 translated_ru, _ = translate_message(message, detected_lang)
 
                 # increment counter and decide if this is super-fun turn
@@ -364,6 +494,7 @@ async def fetch_and_process_messages():
         except Exception as e:
             print(f"⚠ API Error: {e}")
             await asyncio.sleep(5)
+
 
 async def main():
     print("🚀 Alesha is running with integrated WebSocket server")
