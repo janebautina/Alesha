@@ -1,7 +1,7 @@
 import asyncio
 import websockets
 import json
-
+#depricated
 connected_clients = set()
 
 async def handler(websocket):  # path removed correctly

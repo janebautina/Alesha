@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
@@ -15,41 +15,62 @@ interface ChatMessage {
 
 export default function HomePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
   const [input, setInput] = useState("");
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8765");
+    let socket: WebSocket;
 
-    ws.onopen = () => {
-      console.log("✅ Connected to WebSocket server");
+    const connect = () => {
+      socket = new WebSocket("ws://localhost:8765");
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        console.log("✅ Connected to WebSocket server");
+        setIsConnected(true);
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data: ChatMessage = JSON.parse(event.data);
+          console.log("📥 New message:", data);
+          setMessages((prev) => [...prev.slice(-49), data]); // Keep last 50
+        } catch (err) {
+          console.error("❌ Error parsing WebSocket message:", err);
+        }
+      };
+
+      socket.onerror = (err) => {
+        console.error("❌ WebSocket error:", err);
+      };
+
+      socket.onclose = () => {
+        console.warn("⚠️ WebSocket connection closed");
+        setIsConnected(false);
+        setTimeout(connect, 2000); // Reconnect after 2s
+      };
     };
 
-    ws.onmessage = (event) => {
-      try {
-        const data: ChatMessage = JSON.parse(event.data);
-        console.log("📥 New message:", data);
-        setMessages((prev) => [...prev.slice(-49), data]); // Keep last 50
-      } catch (err) {
-        console.error("❌ Error parsing WebSocket message:", err);
-      }
-    };
-
-    ws.onerror = (err) => {
-      console.error("❌ WebSocket error", err);
-    };
-
-    ws.onclose = () => {
-      console.warn("⚠️ WebSocket connection closed");
-    };
+    connect();
 
     return () => {
-      ws.close();
+      socket?.close();
     };
   }, []);
 
   return (
     <main className="min-h-screen bg-gray-50 p-4 sm:p-6">
-      <h1 className="text-xl sm:text-2xl font-bold mb-4">📺 Live Chat Viewer (Alesha)</h1>
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-xl sm:text-2xl font-bold">📺 Live Chat Viewer (Alesha)</h1>
+        <span
+          className={`text-sm font-medium ${
+            isConnected ? "text-green-600" : "text-red-500"
+          }`}
+        >
+          {isConnected ? "🟢 Connected" : "🔴 Disconnected"}
+        </span>
+      </div>
 
       <ScrollArea className="h-[65vh] border rounded-lg bg-white p-3 shadow">
         <div className="space-y-4">

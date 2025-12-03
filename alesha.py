@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import random
 import time
 from collections import deque
 
@@ -12,7 +13,7 @@ from langdetect import detect
 from openai import OpenAI
 from supabase.client import create_client, Client
 import websockets
-
+from persona import SYSTEM_PROMPT_ALESHA
 # Config loading
 with open("config.json") as f:
     config = json.load(f)
@@ -35,6 +36,32 @@ last_bot_post_time = 0
 processed_message_ids = deque(maxlen=MAX_TRACKED_MESSAGES)
 processed_message_ids_set = set()
 next_page_token = None
+
+# counter for "super-fun" mode
+message_counter = 0
+next_funny_in = random.randint(3, 5)
+
+LANG_NAME_MAP = {
+    "en": "English",
+    "ru": "Russian",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "nl": "Dutch",
+    "pt": "Portuguese",
+    "tr": "Turkish",
+    "pl": "Polish",
+    "uk": "Ukrainian",
+    "cs": "Czech",
+    "ro": "Romanian",
+    "bg": "Bulgarian",
+    "hu": "Hungarian",
+    "sv": "Swedish",
+    "fi": "Finnish",
+    "da": "Danish",
+}
+
 
 def initialize_chat_ids():
     """Initialize LIVE_CHAT_ID and LIVE_STREAM_ID from environment variables."""
@@ -76,6 +103,10 @@ def _extract_deepl_text(result):
     return result.text
 
 def translate_message(message, source_language):
+    """
+    Translate message to Russian (for context / UI) and back into original language via RU.
+    For Alesha persona we primarily care about the Russian translation as context.
+    """
     try:
         result_ru = translator.translate_text(message, target_lang="RU")
         translated_to_russian = _extract_deepl_text(result_ru)
@@ -107,9 +138,11 @@ def send_message_to_chat(message, prefix="🔴"):
                 "snippet": {
                     "liveChatId": LIVE_CHAT_ID,
                     "type": "textMessageEvent",
-                    "textMessageDetails": {"messageText": f"{prefix} {message}"}
+                    "textMessageDetails": {
+                        "messageText": f"{prefix} {message}"
+                    },
                 }
-            }
+            },
         ).execute()
         print(f"✅ Sent to YouTube chat.")
     except Exception as e:
@@ -132,7 +165,7 @@ def save_message_to_supabase(message_data):
         print(f"⚠ Failed to save to Supabase: {e}")
         return None
 
-def generate_ai_response(message, language):
+"""def generate_ai_response(message, language):
     global last_request_time
     try:
         if time.time() - last_request_time < 2:
@@ -182,9 +215,82 @@ def generate_ai_response(message, language):
     except Exception as e:
         print(f"⚠ AI Response Error: {e}")
         return "AI error", "Ошибка AI"
+"""
+
+def generate_alesha_reply(
+    original_message: str,
+    translated_ru: str,
+    source_language: str,
+    author_name: str,
+    joke_mode: bool = False,
+) -> str:
+    """
+    Generate a short, lively reply from Alesha in the SAME LANGUAGE as the sender.
+    Uses SYSTEM_PROMPT_ALESHA persona.
+    """
+    global last_request_time
+
+    try:
+        # simple rate limiting to avoid hammering OpenAI
+        if time.time() - last_request_time < 2:
+            time.sleep(2)
+
+        lang_code = (source_language or "unknown").lower()
+        lang_name = LANG_NAME_MAP.get(lang_code, "Unknown language")
+
+        style_line = (
+            "Сделай ответ особенно ярким, игривым, можно чуть более шуточным, но без кринжа. "
+            "Сейчас режим супер-весёлого тамады."
+            if joke_mode
+            else "Сделай ответ дружелюбным, тёплым, без лишнего кринжа. Лёгкий юмор допустим."
+        )
+
+        user_prompt = f"""
+Original message (language code: {lang_code}, approx: {lang_name}):
+{original_message}
+
+Russian translation (for your understanding):
+{translated_ru}
+
+Author nickname in chat: {author_name}
+
+Your task:
+- Reply in the SAME LANGUAGE as the original message (language code: {lang_code}, approx: {lang_name}).
+- 1–3 short sentences max.
+- You can briefly reflect the meaning (like a playful paraphrase) and add emotion/banter.
+- Do NOT say you are a bot or AI.
+- Do NOT use phrases like "how can I help", "how may I help", "how can I be useful".
+- {style_line}
+If language code is "unknown", reply in a fun mix of Russian and English.
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0.9 if joke_mode else 0.6,
+            max_tokens=80,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_ALESHA},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            return "Alesha got a little shy, send another message 😉"
+
+        reply = content.strip()
+        if len(reply) > 180:
+            reply = reply[:177] + "..."
+
+        last_request_time = time.time()
+        return reply
+
+    except Exception as e:
+        print(f"⚠ AI Tamada Error: {e}")
+        return "Alesha glitched for a sec, next message please ✨"
 
 async def fetch_and_process_messages():
-    global next_page_token, last_bot_post_time
+    global next_page_token, last_bot_post_time, message_counter, next_funny_in
     while True:
         try:
             request = youtube.liveChatMessages().list(
@@ -212,24 +318,40 @@ async def fetch_and_process_messages():
                 author = item["authorDetails"]["displayName"]
                 detected_lang = detect_language(message)
 
-                if detected_lang == "ru":
-                    continue
 
                 now = time.time()
                 if now - last_bot_post_time < BOT_COOLDOWN_SECONDS:
                     continue
 
-                translated_msg, _ = translate_message(message, detected_lang)
-                ai_response_original, ai_response_ru = generate_ai_response(message, detected_lang)
+                 # Translate to Russian for context / logs / UI
+                translated_ru, _ = translate_message(message, detected_lang)
 
-                send_message_to_chat(f"💬 AI Reply: {ai_response_original} | {ai_response_ru}")
+                # increment counter and decide if this is super-fun turn
+                message_counter += 1
+                is_funny = message_counter >= next_funny_in
+
+                reply_text = generate_alesha_reply(
+                    original_message=message,
+                    translated_ru=translated_ru,
+                    source_language=detected_lang,
+                    author_name=author,
+                    joke_mode=is_funny,
+                )
+
+                prefix = "🎉" if is_funny else "💬"
+                send_message_to_chat(reply_text, prefix=prefix)
                 last_bot_post_time = now
+
+                # reset funny counter if we just did a super-funny one
+                if is_funny:
+                    message_counter = 0
+                    next_funny_in = random.randint(3, 5)
 
                 msg_payload = {
                     "id": msg_id,
                     "author": author,
-                    "content": ai_response_original,
-                    "language": detected_lang
+                    "content": reply_text,
+                    "language": detected_lang,
                 }
 
                 save_message_to_supabase(msg_payload)
