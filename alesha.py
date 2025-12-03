@@ -13,7 +13,7 @@ from langdetect import detect
 from openai import OpenAI
 from supabase.client import create_client, Client
 import websockets
-from persona import SYSTEM_PROMPT_ALESHA
+from persona import get_system_prompt_for_lang
 # Config loading
 with open("config.json") as f:
     config = json.load(f)
@@ -246,30 +246,32 @@ def generate_alesha_reply(
         )
 
         user_prompt = f"""
-Original message (language code: {lang_code}, approx: {lang_name}):
-{original_message}
+            Original message (language code: {lang_code}, approx: {lang_name}):
+            {original_message}
 
-Russian translation (for your understanding):
-{translated_ru}
+            Russian translation (for your understanding):
+            {translated_ru}
 
-Author nickname in chat: {author_name}
+            Author nickname in chat: {author_name}
 
-Your task:
-- Reply in the SAME LANGUAGE as the original message (language code: {lang_code}, approx: {lang_name}).
-- 1–3 short sentences max.
-- You can briefly reflect the meaning (like a playful paraphrase) and add emotion/banter.
-- Do NOT say you are a bot or AI.
-- Do NOT use phrases like "how can I help", "how may I help", "how can I be useful".
-- {style_line}
-If language code is "unknown", reply in a fun mix of Russian and English.
-"""
+            Your task:
+            - Reply in the SAME LANGUAGE as the original message (language code: {lang_code}, approx: {lang_name}).
+            - 1–3 short sentences max.
+            - You can briefly reflect the meaning (like a playful paraphrase) and add emotion/banter.
+            - Do NOT say you are a bot or AI.
+            - Do NOT use phrases like "how can I help", "how may I help", "how can I be useful".
+            - {style_line}
+            If language code is "unknown", reply in a fun mix of Russian and English.
+        """
+
+        system_prompt = get_system_prompt_for_lang(lang_code)
 
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             temperature=0.9 if joke_mode else 0.6,
             max_tokens=80,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT_ALESHA},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
