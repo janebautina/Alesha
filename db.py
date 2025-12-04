@@ -48,9 +48,9 @@ def get_supabase() -> Optional[Client]:
 
 def save_message_to_supabase(message_data: dict):
     """
-    Сохранить сообщение в таблицу public.messages.
+    Save message to public.messages table.
 
-    Ожидает минимум:
+    Expects minimum:
         {
             "id": <yt message id>,
             "author": <author name>,
@@ -58,12 +58,12 @@ def save_message_to_supabase(message_data: dict):
             "language": <lang_code>,
         }
 
-    Опционально можно добавить:
+    Optional:
         "timestamp", "platform", "streamer_id", "subscriber_id"
     """
     client = get_supabase()
     if client is None:
-        # Supabase не настроен — просто тихо пропускаем логирование
+        # Supabase is not configured — just silently log the error
         return None
 
     try:
