@@ -1,19 +1,20 @@
 #!/bin/bash
 
-echo "🚀 Starting YouTube Live Chat Translator Bot Setup..."
+echo "🚀 Starting Alesha YouTube Live Chat Bot + WebSocket..."
 
-# Activate Virtual Environment
+# Activate virtual environment
 echo "🔹 Activating Python virtual environment..."
 source yt_env/bin/activate || {
   echo "❌ Failed to activate virtual environment."
   exit 1
 }
 
-# Remove old token.json (forces re-authentication if needed)
-if [[ -f "token.json" ]]; then
-  echo "🔹 Removing old token.json..."
-  rm token.json
-fi
+# ⚠ Обычно token.json НЕ удаляем каждый запуск.
+# Если хочешь принудительно переавторизоваться — раскомментируй блок ниже.
+# if [[ -f "token.json" ]]; then
+#   echo "🔹 Removing old token.json..."
+#   rm token.json
+# fi
 
 # Authenticate with YouTube API
 echo "🔹 Running authentication process..."
@@ -22,7 +23,7 @@ python3 auth.py || {
   exit 1
 }
 
-# Fetch Live Stream ID and Live Chat ID (single execution)
+# Fetch Live Stream ID and Live Chat ID
 echo "🔹 Fetching current Live Stream ID and Live Chat ID..."
 LIVE_INFO=$(python3 get_live_chat_id.py)
 
@@ -38,6 +39,10 @@ fi
 echo "✅ Found Live Stream ID: $LIVE_STREAM_ID"
 echo "✅ Found Live Chat ID: $LIVE_CHAT_ID"
 
-# Pass Live Chat ID and Stream ID as environment variables
-echo "💬 Starting YouTube Live Chat Translator Bot..."
-LIVE_CHAT_ID="$LIVE_CHAT_ID" LIVE_STREAM_ID="$LIVE_STREAM_ID" python3 alesha.py
+# Export env vars so alesha.py can see them
+export LIVE_STREAM_ID
+export LIVE_CHAT_ID
+
+# Run Alesha (YouTube bot + WebSocket server)
+echo "💬 Starting Alesha bot with WebSocket server on ws://localhost:8765 ..."
+python3 alesha.py

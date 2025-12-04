@@ -11,9 +11,11 @@ import googleapiclient.discovery
 import deepl
 from langdetect import detect
 from openai import OpenAI
-from supabase.client import create_client, Client
 import websockets
+
 from persona import get_system_prompt_for_lang
+from db import save_message_to_supabase  # 🔹 новый импорт
+
 # Config loading
 with open("config.json") as f:
     config = json.load(f)
@@ -26,10 +28,17 @@ LIVE_STREAM_ID = os.getenv("LIVE_STREAM_ID")
 connected_clients = set()
 
 # Globals
-translator = deepl.Translator(config["DEEPL_API_KEY"], server_url="https://api-free.deepl.com")
+translator = deepl.Translator(
+    config["DEEPL_API_KEY"],
+    server_url="https://api-free.deepl.com"
+)
 client = OpenAI(api_key=config["OPENAI_API_KEY"])
-supabase: Client = create_client(config["SUPABASE_URL"], config["SUPABASE_KEY"])
-youtube = googleapiclient.discovery.build("youtube", "v3", credentials=Credentials.from_authorized_user_file(config["TOKEN_FILE"], SCOPES))
+
+youtube = googleapiclient.discovery.build(
+    "youtube",
+    "v3",
+    credentials=Credentials.from_authorized_user_file(config["TOKEN_FILE"], SCOPES),
+)
 
 last_request_time = 0
 last_bot_post_time = 0
@@ -76,6 +85,7 @@ def initialize_chat_ids():
     LIVE_STREAM_ID = os.getenv("LIVE_STREAM_ID")
     return LIVE_CHAT_ID, LIVE_STREAM_ID
 
+
 # WebSocket handler
 async def handler(websocket):
     print("🔌 New client connected")
@@ -88,25 +98,32 @@ async def handler(websocket):
     finally:
         connected_clients.remove(websocket)
 
+
 async def broadcast_message(message_dict):
     if connected_clients:
         message = json.dumps(message_dict)
         print(f"📡 Broadcasting to {len(connected_clients)} clients: {message}")
-        await asyncio.gather(*(client.send(message) for client in connected_clients), return_exceptions=True)
+        await asyncio.gather(
+            *(client.send(message) for client in connected_clients),
+            return_exceptions=True,
+        )
     else:
         print("⚠️ No connected clients to broadcast to.")
+
 
 def detect_language(text):
     try:
         return detect(text)
-    except:
+    except Exception:
         return "unknown"
+
 
 def _extract_deepl_text(result):
     """Extract text from DeepL translation result (handles both single TextResult and list)."""
     if isinstance(result, list):
         return result[0].text if result else ""
     return result.text
+
 
 def translate_message(message, source_language):
     """
@@ -120,8 +137,13 @@ def translate_message(message, source_language):
             return translated_to_russian, translated_to_russian
 
         target = {
-            "en": "EN-US", "fr": "FR", "es": "ES", "de": "DE",
-            "it": "IT", "nl": "NL", "ru": "RU"
+            "en": "EN-US",
+            "fr": "FR",
+            "es": "ES",
+            "de": "DE",
+            "it": "IT",
+            "nl": "NL",
+            "ru": "RU",
         }.get(source_language, "EN-US")
 
         result_back = translator.translate_text(translated_to_russian, target_lang=target)
@@ -130,6 +152,7 @@ def translate_message(message, source_language):
     except Exception as e:
         print(f"⚠ Translation Error: {e}")
         return message, message
+
 
 def send_message_to_chat(message, prefix="🔴"):
     try:
@@ -154,73 +177,11 @@ def send_message_to_chat(message, prefix="🔴"):
     except Exception as e:
         print(f"⚠ Failed to send to chat: {e}")
 
-def save_message_to_supabase(message_data):
-    try:
-        data = {
-            "message_id": message_data["id"],
-            "author": message_data["author"],
-            "content": message_data["content"],
-            "language": message_data["language"],
-            "timestamp": time.time(),
-            "platform": "youtube"
-        }
-        result = supabase.table("messages").insert(data).execute()
-        print(f"✅ Saved message to Supabase: {message_data['id']}")
-        return result
-    except Exception as e:
-        print(f"⚠ Failed to save to Supabase: {e}")
-        return None
 
-"""def generate_ai_response(message, language):
-    global last_request_time
-    try:
-        if time.time() - last_request_time < 2:
-            time.sleep(2)
-
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are Alesha — a beautiful, sexy, and brilliant woman with deep knowledge of psychology. "
-                        "You're confident, charming, and irresistible. "
-                        "Reply briefly, clearly, and helpfully in the same language the user spoke. "
-                        "Keep replies under 100 characters. Never repeat the user's message."
-                    )
-                },
-                {"role": "user", "content": message}
-            ]
-        )
-
-        content = response.choices[0].message.content
-        if content is None:
-            return "AI error", "Ошибка AI"
-        
-        ai_response = content.strip()
-        if len(ai_response) > 100:
-            ai_response = ai_response[:97] + "..."
-
-        last_request_time = time.time()
-
-        result_ru = translator.translate_text(ai_response, target_lang="RU")
-        ai_response_ru = _extract_deepl_text(result_ru)
-
-        if language.lower() != "ru":
-            deepl_lang = {
-                "en": "EN-US", "fr": "FR", "es": "ES", "de": "DE",
-                "it": "IT", "nl": "NL", "ru": "RU"
-            }.get(language.lower(), "EN-US")
-            result_orig = translator.translate_text(ai_response, target_lang=deepl_lang)
-            ai_response_original = _extract_deepl_text(result_orig)
-        else:
-            ai_response_original = ai_response
-
-        return ai_response_original, ai_response_ru
-
-    except Exception as e:
-        print(f"⚠ AI Response Error: {e}")
-        return "AI error", "Ошибка AI"
+"""
+The old generate_ai_response is currently commented out.
+If you decide to bring it back, it’s better to use db.py as well, 
+rather than accessing Supabase directly from here.
 """
 
 def get_current_like_count():
@@ -245,10 +206,10 @@ def get_current_like_count():
         print(f"⚠ Failed to fetch like count: {e}")
         return None
 
+
 def generate_alesha_welcome(author_name: str, source_language: str) -> str:
     """
-    Сгенерировать короткое приветствие для НОВОГО зрителя
-    на его языке (если известен).
+    Generate a short greeting for a NEW viewer in their language (if known)
     """
     global last_request_time
 
@@ -272,7 +233,6 @@ def generate_alesha_welcome(author_name: str, source_language: str) -> str:
 
         system_prompt = get_system_prompt_for_lang(lang_code)
 
-        # Чуть меньше temperature, чтобы приветствия были мягче
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             temperature=0.7,
@@ -373,6 +333,7 @@ def generate_alesha_reply(
         print(f"⚠ AI Tamada Error: {e}")
         return "Alesha glitched for a sec, next message please ✨"
 
+
 async def fetch_and_process_messages():
     global next_page_token, last_bot_post_time, message_counter, next_funny_in
     global last_like_check_time, last_like_count, seen_authors
@@ -393,7 +354,6 @@ async def fetch_and_process_messages():
                         diff = like_count - last_like_count
                         last_like_count = like_count
 
-                        # чуть разные тексты в зависимости от масштаба
                         if like_count in (10, 25, 50, 100):
                             text = (
                                 f"✨ Маленький юбилей — {like_count} лайков! "
@@ -481,12 +441,15 @@ async def fetch_and_process_messages():
 
                 msg_payload = {
                     "id": msg_id,
-                    "author": author,
-                    "content": reply_text,
-                    "language": detected_lang,
+                     "author": author,
+                     "content": message,      # ← сохраняем ОРИГИНАЛЬНОЕ сообщение зрителя
+                      "language": detected_lang,
                 }
 
+                # 🔹 логируем в Supabase через db.py
                 save_message_to_supabase(msg_payload)
+
+                # 🔹 и шлём на фронтенд по WebSocket
                 await broadcast_message(msg_payload)
 
             await asyncio.sleep(polling_interval)
@@ -500,6 +463,7 @@ async def main():
     print("🚀 Alesha is running with integrated WebSocket server")
     async with websockets.serve(handler, "localhost", 8765):
         await fetch_and_process_messages()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
