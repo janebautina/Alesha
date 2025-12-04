@@ -14,7 +14,11 @@ from openai import OpenAI
 import websockets
 
 from persona import get_system_prompt_for_lang
-from db import save_message_to_supabase  # 🔹 new import
+from db import (
+    save_message_to_supabase,
+    get_or_create_streamer,
+    get_or_create_subscriber,
+)
 
 # Config loading
 with open("config.json") as f:
@@ -27,7 +31,6 @@ LIVE_CHAT_ID = os.getenv("LIVE_CHAT_ID")
 LIVE_STREAM_ID = os.getenv("LIVE_STREAM_ID")
 connected_clients = set()
 
-# YouTube live chat message length limit
 MAX_YT_MESSAGE_LEN = 200
 
 # Globals
@@ -40,7 +43,9 @@ client = OpenAI(api_key=config["OPENAI_API_KEY"])
 youtube = googleapiclient.discovery.build(
     "youtube",
     "v3",
-    credentials=Credentials.from_authorized_user_file(config["TOKEN_FILE"], SCOPES),
+    credentials=Credentials.from_authorized_user_file(
+        config["TOKEN_FILE"], SCOPES
+    ),
 )
 
 last_request_time = 0
@@ -57,8 +62,7 @@ next_funny_in = random.randint(3, 5)
 seen_authors = set()
 last_like_check_time = 0
 last_like_count = None
-LIKE_CHECK_INTERVAL = 60  # seconds
-
+LIKE_CHECK_INTERVAL = 60  # сек, можно поменять
 
 LANG_NAME_MAP = {
     "en": "English",
@@ -104,12 +108,11 @@ async def handler(websocket):
 
 
 async def broadcast_message(message_dict):
-    """Broadcast JSON payload to all connected WebSocket clients."""
     if connected_clients:
         message = json.dumps(message_dict)
         print(f"📡 Broadcasting to {len(connected_clients)} clients: {message}")
         await asyncio.gather(
-            *(ws.send(message) for ws in connected_clients),
+            *(client.send(message) for client in connected_clients),
             return_exceptions=True,
         )
     else:
@@ -151,7 +154,9 @@ def translate_message(message, source_language):
             "ru": "RU",
         }.get(source_language, "EN-US")
 
-        result_back = translator.translate_text(translated_to_russian, target_lang=target)
+        result_back = translator.translate_text(
+            translated_to_russian, target_lang=target
+        )
         translated_back = _extract_deepl_text(result_back)
         return translated_to_russian, translated_back
     except Exception as e:
@@ -168,13 +173,11 @@ def build_chat_text(prefix: str, text: str) -> str:
     if len(base) <= MAX_YT_MESSAGE_LEN:
         return base
 
-    # leave room for ellipsis
     keep = MAX_YT_MESSAGE_LEN - 1
     return base[:keep] + "…"
 
 
-def send_message_to_chat(message: str, prefix: str = "🔴"):
-    """Send a message to YouTube live chat with prefix and safe length."""
+def send_message_to_chat(message, prefix="🔴"):
     try:
         if not LIVE_CHAT_ID:
             raise ValueError("LIVE_CHAT_ID is not set.")
@@ -187,9 +190,7 @@ def send_message_to_chat(message: str, prefix: str = "🔴"):
                 "snippet": {
                     "liveChatId": LIVE_CHAT_ID,
                     "type": "textMessageEvent",
-                    "textMessageDetails": {
-                        "messageText": final_text
-                    },
+                    "textMessageDetails": {"messageText": final_text},
                 }
             },
         ).execute()
@@ -200,7 +201,7 @@ def send_message_to_chat(message: str, prefix: str = "🔴"):
 
 """
 The old generate_ai_response is currently commented out.
-If you decide to bring it back, it’s better to use db.py as well,
+If you decide to bring it back, it’s better to use db.py as well, 
 rather than accessing Supabase directly from here.
 """
 
@@ -230,7 +231,7 @@ def get_current_like_count():
 
 def generate_alesha_welcome(author_name: str, source_language: str) -> str:
     """
-    Generate a short greeting for a NEW viewer in their language (if known).
+    Generate a short greeting for a NEW viewer in their language (if known)
     """
     global last_request_time
 
@@ -250,7 +251,7 @@ def generate_alesha_welcome(author_name: str, source_language: str) -> str:
             - Do NOT say you are a bot or AI.
             - Do NOT use phrases like "how can I help", "how may I help", "how can I be useful".
             If language code is "unknown", reply in a fun mix of simple Russian and English.
-        """
+            """
 
         system_prompt = get_system_prompt_for_lang(lang_code)
 
@@ -359,9 +360,18 @@ async def fetch_and_process_messages():
     global next_page_token, last_bot_post_time, message_counter, next_funny_in
     global last_like_check_time, last_like_count, seen_authors
 
+    # 🔹 Один раз получаем/создаём стримера (пока — дефолтный для тебя)
+    streamer_row = get_or_create_streamer(
+        external_id="default_youtube_streamer",
+        platform="youtube",
+        # display_name можно изменить на своё имя/название канала
+        display_name=None,
+    )
+    streamer_id = streamer_row.get("id") if streamer_row else None
+
     while True:
         try:
-            # 🔁 periodically check likes and thank viewers
+            # 🔁 Периодически проверяем лайки и благодарим за новые
             now = time.time()
             if now - last_like_check_time > LIKE_CHECK_INTERVAL:
                 like_count = get_current_like_count()
@@ -369,7 +379,6 @@ async def fetch_and_process_messages():
 
                 if like_count is not None:
                     if last_like_count is None:
-                        # first init — just store
                         last_like_count = like_count
                     elif like_count > last_like_count:
                         diff = like_count - last_like_count
@@ -381,9 +390,13 @@ async def fetch_and_process_messages():
                                 f"Вы делаете этот стрим живым, люблю вас."
                             )
                         elif diff == 1:
-                            text = f"💗 Вижу новый лайк, спасибо вам! Сейчас их уже {like_count}."
+                            text = (
+                                f"💗 Вижу новый лайк, спасибо вам! Сейчас их уже {like_count}."
+                            )
                         elif diff < 5:
-                            text = f"💗 Спасибо за ваши лайки! Ещё +{diff}, теперь их {like_count}."
+                            text = (
+                                f"💗 Спасибо за ваши лайки! Ещё +{diff}, теперь их {like_count}."
+                            )
                         else:
                             text = (
                                 f"✨ Вы засыпали стрим лайками (+{diff})! "
@@ -400,7 +413,9 @@ async def fetch_and_process_messages():
             )
             response = request.execute()
             next_page_token = response.get("nextPageToken")
-            polling_interval = response.get("pollingIntervalMillis", 2000) / 1000.0
+            polling_interval = response.get(
+                "pollingIntervalMillis", 2000
+            ) / 1000.0
 
             for item in response.get("items", []):
                 msg_id = item["id"]
@@ -414,22 +429,42 @@ async def fetch_and_process_messages():
                 processed_message_ids.append(msg_id)
                 processed_message_ids_set.add(msg_id)
 
-                message = item["snippet"].get("displayMessage", "[Non-text message]")
-                author = item["authorDetails"]["displayName"]
+                message = item["snippet"].get(
+                    "displayMessage", "[Non-text message]"
+                )
+                author_details = item["authorDetails"]
+                author = author_details["displayName"]
+                channel_id = author_details.get("channelId")
                 detected_lang = detect_language(message)
 
-                # 💾 Save *user* message to Supabase immediately (once)
+                # 🔹 Подписчик (привязка к стримеру + внешнему user id)
+                subscriber_id = None
+                if streamer_id and channel_id:
+                    subscriber_row = get_or_create_subscriber(
+                        streamer_id=streamer_id,
+                        external_user_id=channel_id,
+                        platform="youtube",
+                        display_name=author,
+                    )
+                    if subscriber_row:
+                        subscriber_id = subscriber_row.get("id")
+
+                # 💾 Save *user* message to Supabase immediately
                 user_msg_payload = {
                     "id": msg_id,
                     "author": author,
                     "content": message,
                     "language": detected_lang,
-                    # future: "platform": "youtube", "streamer_id": ..., "subscriber_id": ...
+                    "platform": "youtube",
+                    "streamer_id": streamer_id,
+                    "subscriber_id": subscriber_id,
+                    # timestamp внутри save_message_to_supabase,
+                    # если тут не передаём — будет time.time()
                 }
                 save_message_to_supabase(user_msg_payload)
 
-                # 🔔 broadcast user message to frontend
-                await broadcast_message({**user_msg_payload, "is_bot": False})
+                # 🔹 и сразу шлём на фронт (оригинальное сообщение зрителя)
+                await broadcast_message(user_msg_payload)
 
                 # 👋 New person in chat? Welcome them once
                 is_new_author = author not in seen_authors
@@ -442,6 +477,7 @@ async def fetch_and_process_messages():
                     send_message_to_chat(welcome_text, prefix="🌟")
 
                 now = time.time()
+                # cooldown влияет ТОЛЬКО на ответы бота, но не на логирование/WS
                 if now - last_bot_post_time < BOT_COOLDOWN_SECONDS:
                     continue
 
@@ -464,20 +500,9 @@ async def fetch_and_process_messages():
                 send_message_to_chat(reply_text, prefix=prefix)
                 last_bot_post_time = now
 
-                # reset funny counter if we just did a super-funny one
                 if is_funny:
                     message_counter = 0
                     next_funny_in = random.randint(3, 5)
-
-                # 🔔 broadcast bot reply to frontend (NOT saved in DB)
-                bot_payload = {
-                    "id": f"{msg_id}_reply",
-                    "author": "Alesha",
-                    "content": reply_text,
-                    "language": detected_lang,
-                    "is_bot": True,
-                }
-                await broadcast_message(bot_payload)
 
             await asyncio.sleep(polling_interval)
 

@@ -2,7 +2,7 @@
 """
 check_messages.py — утилита для просмотра последних сообщений из Supabase
 
-Показывает последние N строк из таблицы public.messages.
+Shows last N rows from public.messages table.
 """
 
 from typing import Optional
