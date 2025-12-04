@@ -14,11 +14,7 @@ from openai import OpenAI
 import websockets
 
 from persona import get_system_prompt_for_lang
-from db import (
-    save_message_to_supabase,
-    get_or_create_streamer,
-    get_or_create_subscriber,
-)
+from db import save_message_to_supabase  # shared DB helper
 
 # Config loading
 with open("config.json") as f:
@@ -26,7 +22,7 @@ with open("config.json") as f:
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 MAX_TRACKED_MESSAGES = 1000
-BOT_COOLDOWN_SECONDS = 30
+BOT_COOLDOWN_SECONDS = 30  # global cooldown for all bot messages
 LIVE_CHAT_ID = os.getenv("LIVE_CHAT_ID")
 LIVE_STREAM_ID = os.getenv("LIVE_STREAM_ID")
 connected_clients = set()
@@ -43,9 +39,7 @@ client = OpenAI(api_key=config["OPENAI_API_KEY"])
 youtube = googleapiclient.discovery.build(
     "youtube",
     "v3",
-    credentials=Credentials.from_authorized_user_file(
-        config["TOKEN_FILE"], SCOPES
-    ),
+    credentials=Credentials.from_authorized_user_file(config["TOKEN_FILE"], SCOPES),
 )
 
 last_request_time = 0
@@ -59,10 +53,9 @@ message_counter = 0
 next_funny_in = random.randint(3, 5)
 
 # like counter
-seen_authors = set()
 last_like_check_time = 0
 last_like_count = None
-LIKE_CHECK_INTERVAL = 60  # сек, можно поменять
+LIKE_CHECK_INTERVAL = 60  # seconds, can be tuned
 
 LANG_NAME_MAP = {
     "en": "English",
@@ -108,6 +101,7 @@ async def handler(websocket):
 
 
 async def broadcast_message(message_dict):
+    """Broadcast a JSON message to all connected WebSocket clients."""
     if connected_clients:
         message = json.dumps(message_dict)
         print(f"📡 Broadcasting to {len(connected_clients)} clients: {message}")
@@ -119,7 +113,8 @@ async def broadcast_message(message_dict):
         print("⚠️ No connected clients to broadcast to.")
 
 
-def detect_language(text):
+def detect_language(text: str) -> str:
+    """Detect language code using langdetect, fallback to 'unknown'."""
     try:
         return detect(text)
     except Exception:
@@ -133,9 +128,9 @@ def _extract_deepl_text(result):
     return result.text
 
 
-def translate_message(message, source_language):
+def translate_message(message: str, source_language: str):
     """
-    Translate message to Russian (for context / UI) and back into original language via RU.
+    Translate message to Russian (for context / UI) and back to original language via Russian.
     For Alesha persona we primarily care about the Russian translation as context.
     """
     try:
@@ -154,9 +149,7 @@ def translate_message(message, source_language):
             "ru": "RU",
         }.get(source_language, "EN-US")
 
-        result_back = translator.translate_text(
-            translated_to_russian, target_lang=target
-        )
+        result_back = translator.translate_text(translated_to_russian, target_lang=target)
         translated_back = _extract_deepl_text(result_back)
         return translated_to_russian, translated_back
     except Exception as e:
@@ -167,17 +160,21 @@ def translate_message(message, source_language):
 def build_chat_text(prefix: str, text: str) -> str:
     """
     Build final YouTube chat message with prefix and enforce length limit.
-    Ensures the *combined* string doesn't exceed MAX_YT_MESSAGE_LEN.
+    Ensures the combined string does not exceed MAX_YT_MESSAGE_LEN.
     """
     base = f"{prefix} {text}".strip()
     if len(base) <= MAX_YT_MESSAGE_LEN:
         return base
 
+    # leave room for ellipsis
     keep = MAX_YT_MESSAGE_LEN - 1
     return base[:keep] + "…"
 
 
-def send_message_to_chat(message, prefix="🔴"):
+def send_message_to_chat(message: str, prefix: str = "🔴"):
+    """Send a message into YouTube live chat with length enforcement."""
+    global last_bot_post_time
+
     try:
         if not LIVE_CHAT_ID:
             raise ValueError("LIVE_CHAT_ID is not set.")
@@ -190,23 +187,19 @@ def send_message_to_chat(message, prefix="🔴"):
                 "snippet": {
                     "liveChatId": LIVE_CHAT_ID,
                     "type": "textMessageEvent",
-                    "textMessageDetails": {"messageText": final_text},
+                    "textMessageDetails": {
+                        "messageText": final_text
+                    },
                 }
             },
         ).execute()
+        last_bot_post_time = time.time()
         print(f"✅ Sent to YouTube chat: {final_text!r}")
     except Exception as e:
         print(f"⚠ Failed to send to chat: {e}")
 
 
-"""
-The old generate_ai_response is currently commented out.
-If you decide to bring it back, it’s better to use db.py as well, 
-rather than accessing Supabase directly from here.
-"""
-
-
-def get_current_like_count():
+def get_current_like_count() -> int | None:
     """Fetch current like count for the active live stream."""
     try:
         if not LIVE_STREAM_ID:
@@ -227,58 +220,6 @@ def get_current_like_count():
     except Exception as e:
         print(f"⚠ Failed to fetch like count: {e}")
         return None
-
-
-def generate_alesha_welcome(author_name: str, source_language: str) -> str:
-    """
-    Generate a short greeting for a NEW viewer in their language (if known)
-    """
-    global last_request_time
-
-    try:
-        lang_code = (source_language or "unknown").lower()
-        lang_name = LANG_NAME_MAP.get(lang_code, "Unknown language")
-
-        user_prompt = f"""
-            A new viewer has just written their first message in the livestream chat.
-            Nickname: "{author_name}"
-
-            Your task:
-            - Greet them warmly in their language (language code: {lang_code}, approx: {lang_name}).
-            - 1–2 short sentences max.
-            - Make them feel welcome and part of the community.
-            - You may address them by nickname.
-            - Do NOT say you are a bot or AI.
-            - Do NOT use phrases like "how can I help", "how may I help", "how can I be useful".
-            If language code is "unknown", reply in a fun mix of simple Russian and English.
-            """
-
-        system_prompt = get_system_prompt_for_lang(lang_code)
-
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.7,
-            max_tokens=60,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-
-        content = response.choices[0].message.content
-        if not content:
-            return f"Добро пожаловать, {author_name}! 💫"
-
-        text = content.strip()
-        if len(text) > 160:
-            text = text[:157] + "..."
-
-        last_request_time = time.time()
-        return text
-
-    except Exception as e:
-        print(f"⚠ AI Welcome Error: {e}")
-        return f"Рада видеть тебя в чате, {author_name}! ✨"
 
 
 def generate_alesha_reply(
@@ -345,8 +286,8 @@ def generate_alesha_reply(
             return "Alesha got a little shy, send another message 😉"
 
         reply = content.strip()
-        if len(reply) > 160:
-            reply = reply[:157] + "..."
+        if len(reply) > 180:
+            reply = reply[:177] + "..."
 
         last_request_time = time.time()
         return reply
@@ -357,28 +298,29 @@ def generate_alesha_reply(
 
 
 async def fetch_and_process_messages():
-    global next_page_token, last_bot_post_time, message_counter, next_funny_in
-    global last_like_check_time, last_like_count, seen_authors
-
-    # 🔹 Один раз получаем/создаём стримера (пока — дефолтный для тебя)
-    streamer_row = get_or_create_streamer(
-        external_id="default_youtube_streamer",
-        platform="youtube",
-        # display_name можно изменить на своё имя/название канала
-        display_name=None,
-    )
-    streamer_id = streamer_row.get("id") if streamer_row else None
+    """
+    Main loop:
+    - periodically checks likes and (if cooldown allows) sends thank-you messages;
+    - reads new messages from YouTube;
+    - stores each user message in Supabase;
+    - replies no more often than BOT_COOLDOWN_SECONDS;
+    - broadcasts user messages to WebSocket clients.
+    """
+    global next_page_token, message_counter, next_funny_in
+    global last_like_check_time, last_like_count
 
     while True:
         try:
-            # 🔁 Периодически проверяем лайки и благодарим за новые
             now = time.time()
+
+            # Periodically check likes and thank viewers for new ones (respecting cooldown)
             if now - last_like_check_time > LIKE_CHECK_INTERVAL:
                 like_count = get_current_like_count()
                 last_like_check_time = now
 
                 if like_count is not None:
                     if last_like_count is None:
+                        # First initialization: just store current like count
                         last_like_count = like_count
                     elif like_count > last_like_count:
                         diff = like_count - last_like_count
@@ -390,22 +332,20 @@ async def fetch_and_process_messages():
                                 f"Вы делаете этот стрим живым, люблю вас."
                             )
                         elif diff == 1:
-                            text = (
-                                f"💗 Вижу новый лайк, спасибо вам! Сейчас их уже {like_count}."
-                            )
+                            text = f"💗 Вижу новый лайк, спасибо вам! Сейчас их уже {like_count}."
                         elif diff < 5:
-                            text = (
-                                f"💗 Спасибо за ваши лайки! Ещё +{diff}, теперь их {like_count}."
-                            )
+                            text = f"💗 Спасибо за ваши лайки! Ещё +{diff}, теперь их {like_count}."
                         else:
                             text = (
                                 f"✨ Вы засыпали стрим лайками (+{diff})! "
                                 f"Уже {like_count}, я в восторге."
                             )
 
-                        send_message_to_chat(text, prefix="💖")
+                        # Respect global cooldown for bot messages
+                        if time.time() - last_bot_post_time >= BOT_COOLDOWN_SECONDS:
+                            send_message_to_chat(text, prefix="💖")
 
-            # 📥 Read new messages from YouTube Live Chat
+            # Read new messages from YouTube Live Chat
             request = youtube.liveChatMessages().list(
                 liveChatId=LIVE_CHAT_ID,
                 part="snippet,authorDetails",
@@ -413,15 +353,14 @@ async def fetch_and_process_messages():
             )
             response = request.execute()
             next_page_token = response.get("nextPageToken")
-            polling_interval = response.get(
-                "pollingIntervalMillis", 2000
-            ) / 1000.0
+            polling_interval = response.get("pollingIntervalMillis", 2000) / 1000.0
 
             for item in response.get("items", []):
                 msg_id = item["id"]
                 if msg_id in processed_message_ids_set:
                     continue
 
+                # Maintain a sliding window of processed message IDs
                 if len(processed_message_ids) >= MAX_TRACKED_MESSAGES:
                     old_id = processed_message_ids.popleft()
                     processed_message_ids_set.discard(old_id)
@@ -432,59 +371,29 @@ async def fetch_and_process_messages():
                 message = item["snippet"].get(
                     "displayMessage", "[Non-text message]"
                 )
-                author_details = item["authorDetails"]
-                author = author_details["displayName"]
-                channel_id = author_details.get("channelId")
+                author = item["authorDetails"]["displayName"]
                 detected_lang = detect_language(message)
 
-                # 🔹 Подписчик (привязка к стримеру + внешнему user id)
-                subscriber_id = None
-                if streamer_id and channel_id:
-                    subscriber_row = get_or_create_subscriber(
-                        streamer_id=streamer_id,
-                        external_user_id=channel_id,
-                        platform="youtube",
-                        display_name=author,
-                    )
-                    if subscriber_row:
-                        subscriber_id = subscriber_row.get("id")
-
-                # 💾 Save *user* message to Supabase immediately
+                # Save *user* message to Supabase once
                 user_msg_payload = {
                     "id": msg_id,
                     "author": author,
                     "content": message,
                     "language": detected_lang,
-                    "platform": "youtube",
-                    "streamer_id": streamer_id,
-                    "subscriber_id": subscriber_id,
-                    # timestamp внутри save_message_to_supabase,
-                    # если тут не передаём — будет time.time()
                 }
                 save_message_to_supabase(user_msg_payload)
 
-                # 🔹 и сразу шлём на фронт (оригинальное сообщение зрителя)
-                await broadcast_message(user_msg_payload)
-
-                # 👋 New person in chat? Welcome them once
-                is_new_author = author not in seen_authors
-                if is_new_author:
-                    seen_authors.add(author)
-                    welcome_text = generate_alesha_welcome(
-                        author_name=author,
-                        source_language=detected_lang,
-                    )
-                    send_message_to_chat(welcome_text, prefix="🌟")
-
+                # Respect global cooldown for bot replies
                 now = time.time()
-                # cooldown влияет ТОЛЬКО на ответы бота, но не на логирование/WS
                 if now - last_bot_post_time < BOT_COOLDOWN_SECONDS:
+                    # Still broadcast user message to frontend even if bot stays silent
+                    await broadcast_message(user_msg_payload)
                     continue
 
                 # Translate to Russian for context / logs / UI
                 translated_ru, _ = translate_message(message, detected_lang)
 
-                # increment counter and decide if this is super-fun turn
+                # Increment counter and decide if this is a "super-fun" turn
                 message_counter += 1
                 is_funny = message_counter >= next_funny_in
 
@@ -498,11 +407,14 @@ async def fetch_and_process_messages():
 
                 prefix = "🎉" if is_funny else "💬"
                 send_message_to_chat(reply_text, prefix=prefix)
-                last_bot_post_time = now
 
+                # Reset funny counter if we just did a super-funny one
                 if is_funny:
                     message_counter = 0
                     next_funny_in = random.randint(3, 5)
+
+                # Broadcast original user message to frontend
+                await broadcast_message(user_msg_payload)
 
             await asyncio.sleep(polling_interval)
 
