@@ -173,7 +173,18 @@ The following files are **ignored by Git** and should never be committed:
 
 ---
 
+## Progress
+
+- [x] YouTube Live Chat integration
+- [x] Alesha persona + AI ответы
+- [x] Supabase: messages table
+- [x] WebSocket server for frontend
+- [x] Safe YouTube message length (no more cut-off messages 💬)
+- [ ] Поддержка нескольких стримеров через Telegram-бота
+- [ ] UI-панель в вебе для просмотра сообщений / статистики
 ## 🙌 Contributing
+
+---
 
 Contributions and ideas welcome!  
 Open an issue or create a pull request.

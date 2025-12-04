@@ -27,6 +27,8 @@ LIVE_CHAT_ID = os.getenv("LIVE_CHAT_ID")
 LIVE_STREAM_ID = os.getenv("LIVE_STREAM_ID")
 connected_clients = set()
 
+MAX_YT_MESSAGE_LEN = 200
+
 # Globals
 translator = deepl.Translator(
     config["DEEPL_API_KEY"],
@@ -153,13 +155,27 @@ def translate_message(message, source_language):
         print(f"⚠ Translation Error: {e}")
         return message, message
 
+def build_chat_text(prefix: str, text: str) -> str:
+    """
+    Build final YouTube chat message with prefix and enforce length limit.
+    Ensures the *combined* string doesn't exceed MAX_YT_MESSAGE_LEN.
+    """
+    base = f"{prefix} {text}".strip()
+    if len(base) <= MAX_YT_MESSAGE_LEN:
+        return base
+
+    # leave room for ellipsis
+    keep = MAX_YT_MESSAGE_LEN - 1
+    return base[:keep] + "…"
+
 
 def send_message_to_chat(message, prefix="🔴"):
     try:
         if not LIVE_CHAT_ID:
             raise ValueError("LIVE_CHAT_ID is not set.")
-        if len(message) > 200:
-            message = message[:197] + "..."
+
+        # Собираем финальный текст с префиксом и режем по общему лимиту
+        final_text = build_chat_text(prefix, message)
 
         youtube.liveChatMessages().insert(
             part="snippet",
@@ -168,12 +184,12 @@ def send_message_to_chat(message, prefix="🔴"):
                     "liveChatId": LIVE_CHAT_ID,
                     "type": "textMessageEvent",
                     "textMessageDetails": {
-                        "messageText": f"{prefix} {message}"
+                        "messageText": final_text
                     },
                 }
             },
         ).execute()
-        print(f"✅ Sent to YouTube chat.")
+        print(f"✅ Sent to YouTube chat: {final_text!r}")
     except Exception as e:
         print(f"⚠ Failed to send to chat: {e}")
 
@@ -323,8 +339,8 @@ def generate_alesha_reply(
             return "Alesha got a little shy, send another message 😉"
 
         reply = content.strip()
-        if len(reply) > 180:
-            reply = reply[:177] + "..."
+        if len(reply) > 160:
+            reply = reply[:157] + "..."
 
         last_request_time = time.time()
         return reply
