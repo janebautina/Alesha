@@ -16,7 +16,7 @@ import websockets
 from persona import get_system_prompt_for_lang
 from db import save_message_to_supabase  # shared DB helper
 
-# Config loading
+# -------- Config loading --------
 with open("config.json") as f:
     config = json.load(f)
 
@@ -29,7 +29,25 @@ connected_clients = set()
 
 MAX_YT_MESSAGE_LEN = 200
 
-# Globals
+# -------- Payment / donations config (edit these for your real data) --------
+GRATITUDE_COOLDOWN_SECONDS = 600  # 10 minutes shared cooldown for likes + donations
+LIKE_CHECK_INTERVAL = 60  # seconds to poll like count
+
+# How often to show donation info (text-based donations for users without SuperChat)
+DONATION_INFO_INTERVAL_SECONDS = 600  # 10 minutes
+
+# TODO: replace these placeholders with your real data
+DONATION_CARD_TEXT = "**** **** **** ****"  # your card number / bank details
+PAYPAL_LINK = "https://paypal.me/your_link"  # your PayPal.me link
+DONATIONALERTS_URL = "https://www.donationalerts.com/r/your_channel"  # your DonationAlerts link
+
+DONATION_INFO_TEXT = (
+    "Хочешь поддержать стрим или заказать музыку? 🎵 "
+    f"Карта: {DONATION_CARD_TEXT} | PayPal: {PAYPAL_LINK} | DonationAlerts: {DONATIONALERTS_URL}. "
+    "Один трек — 250₽."
+)
+
+# -------- Globals --------
 translator = deepl.Translator(
     config["DEEPL_API_KEY"],
     server_url="https://api-free.deepl.com",
@@ -42,20 +60,23 @@ youtube = googleapiclient.discovery.build(
     credentials=Credentials.from_authorized_user_file(config["TOKEN_FILE"], SCOPES),
 )
 
-last_request_time = 0
-last_bot_post_time = 0
+last_request_time = 0.0
+last_bot_post_time = 0.0
 processed_message_ids = deque(maxlen=MAX_TRACKED_MESSAGES)
-processed_message_ids_set = set()
+processed_message_ids_set: set[str] = set()
 next_page_token = None
 
 # counter for "super-fun" mode
 message_counter = 0
 next_funny_in = random.randint(3, 5)
 
-# like counter
-last_like_check_time = 0
-last_like_count = None
-LIKE_CHECK_INTERVAL = 60  # seconds, can be tuned
+# likes and gratitude state
+seen_authors = set()
+last_like_check_time = 0.0
+last_like_count: int | None = None
+
+last_gratitude_time = 0.0  # for likes + donations + donation-info text
+last_donation_info_time = 0.0
 
 LANG_NAME_MAP = {
     "en": "English",
@@ -78,6 +99,18 @@ LANG_NAME_MAP = {
     "da": "Danish",
 }
 
+MENTION_KEYWORDS = [
+    "алёша",
+    "алеша",
+    "alesha",
+    "Алеша",
+    "Aлёша",
+    "Alesha",
+    "Al",
+    "al",
+    "@californicationru",
+    "@californicationru ",  # YouTube sometimes adds a trailing space after the username
+]
 
 def initialize_chat_ids():
     """Initialize LIVE_CHAT_ID and LIVE_STREAM_ID from environment variables."""
@@ -87,7 +120,7 @@ def initialize_chat_ids():
     return LIVE_CHAT_ID, LIVE_STREAM_ID
 
 
-# WebSocket handler
+# -------- WebSocket handling --------
 async def handler(websocket):
     print("🔌 New client connected")
     connected_clients.add(websocket)
@@ -113,6 +146,7 @@ async def broadcast_message(message_dict):
         print("⚠️ No connected clients to broadcast to.")
 
 
+# -------- Language / translation helpers --------
 def detect_language(text: str) -> str:
     """Detect language code using langdetect, fallback to 'unknown'."""
     try:
@@ -157,6 +191,7 @@ def translate_message(message: str, source_language: str):
         return message, message
 
 
+# -------- YouTube chat helpers --------
 def build_chat_text(prefix: str, text: str) -> str:
     """
     Build final YouTube chat message with prefix and enforce length limit.
@@ -166,13 +201,12 @@ def build_chat_text(prefix: str, text: str) -> str:
     if len(base) <= MAX_YT_MESSAGE_LEN:
         return base
 
-    # leave room for ellipsis
     keep = MAX_YT_MESSAGE_LEN - 1
     return base[:keep] + "…"
 
 
 def send_message_to_chat(message: str, prefix: str = "🔴"):
-    """Send a message into YouTube live chat with length enforcement."""
+    """Send a message into YouTube live chat with length enforcement and update bot cooldown."""
     global last_bot_post_time
 
     try:
@@ -222,6 +256,32 @@ def get_current_like_count() -> int | None:
         return None
 
 
+def maybe_send_gratitude(text: str, prefix: str = "💖") -> None:
+    """
+    Send a thank-you / donation-info message using a shared cooldown.
+    Likes, SuperChat, and donation-info text share the same 10-minute cooldown,
+    and also respect the global BOT_COOLDOWN_SECONDS.
+    """
+    global last_gratitude_time, last_bot_post_time
+
+    now = time.time()
+
+    # Shared gratitude cooldown
+    if now - last_gratitude_time < GRATITUDE_COOLDOWN_SECONDS:
+        print("⏱ Skipping gratitude message due to shared 10-min cooldown.")
+        return
+
+    # Also respect global bot cooldown, so we do not spam messages too frequently
+    if now - last_bot_post_time < BOT_COOLDOWN_SECONDS:
+        print("⏱ Skipping gratitude message due to global bot cooldown.")
+        return
+
+    send_message_to_chat(text, prefix=prefix)
+    last_gratitude_time = now
+    # last_bot_post_time is updated inside send_message_to_chat
+
+
+# -------- AI reply generation --------
 def generate_alesha_reply(
     original_message: str,
     translated_ru: str,
@@ -297,23 +357,27 @@ def generate_alesha_reply(
         return "Alesha glitched for a sec, next message please ✨"
 
 
+# -------- Main loop --------
 async def fetch_and_process_messages():
     """
     Main loop:
     - periodically checks likes and (if cooldown allows) sends thank-you messages;
+    - periodically sends donation-info text (card, PayPal, DonationAlerts);
     - reads new messages from YouTube;
     - stores each user message in Supabase;
     - replies no more often than BOT_COOLDOWN_SECONDS;
-    - broadcasts user messages to WebSocket clients.
+    - broadcasts user messages to WebSocket clients;
+    - uses a shared 10-min gratitude cooldown for likes, donations, and donation-info.
     """
     global next_page_token, message_counter, next_funny_in
     global last_like_check_time, last_like_count
+    global last_donation_info_time
 
     while True:
         try:
             now = time.time()
 
-            # Periodically check likes and thank viewers for new ones (respecting cooldown)
+            # Periodically check likes and thank viewers for new ones
             if now - last_like_check_time > LIKE_CHECK_INTERVAL:
                 like_count = get_current_like_count()
                 last_like_check_time = now
@@ -341,9 +405,13 @@ async def fetch_and_process_messages():
                                 f"Уже {like_count}, я в восторге."
                             )
 
-                        # Respect global cooldown for bot messages
-                        if time.time() - last_bot_post_time >= BOT_COOLDOWN_SECONDS:
-                            send_message_to_chat(text, prefix="💖")
+                        # Send thanks for likes using shared likes+donations cooldown
+                        maybe_send_gratitude(text, prefix="💖")
+
+            # Periodically show donation info (card + PayPal + DonationAlerts) using shared cooldown
+            if now - last_donation_info_time > DONATION_INFO_INTERVAL_SECONDS:
+                maybe_send_gratitude(DONATION_INFO_TEXT, prefix="💸")
+                last_donation_info_time = now
 
             # Read new messages from YouTube Live Chat
             request = youtube.liveChatMessages().list(
@@ -368,24 +436,55 @@ async def fetch_and_process_messages():
                 processed_message_ids.append(msg_id)
                 processed_message_ids_set.add(msg_id)
 
-                message = item["snippet"].get(
-                    "displayMessage", "[Non-text message]"
-                )
-                author = item["authorDetails"]["displayName"]
-                detected_lang = detect_language(message)
+                snippet = item.get("snippet", {})
+                message = snippet.get("displayMessage", "[Non-text message]")
+                author_details = item.get("authorDetails", {}) or {}
 
-                # Save *user* message to Supabase once
+                author = author_details.get("displayName", "Unknown")
+                detected_lang = detect_language(message)
+                is_owner = bool(author_details.get("isChatOwner"))
+                text_lower = message.lower()
+                addressed_bot = any(key in text_lower for key in MENTION_KEYWORDS)
+
+                # Detect Super Chat / donation events and thank with shared cooldown
+                event_type = snippet.get("type")
+                super_chat_details = snippet.get("superChatDetails")
+
+                if event_type == "superChatEvent" and super_chat_details:
+                    amount_str = super_chat_details.get("amountDisplayString") or ""
+                    donor_name = author
+
+                    if amount_str:
+                        donation_text = (
+                            f"Thank you for the Super Chat {amount_str}, {donor_name}! "
+                            f"You keep this stream alive 💖"
+                        )
+                    else:
+                        donation_text = (
+                            f"Thank you so much for your support, {donor_name}! 💖"
+                        )
+
+                    maybe_send_gratitude(donation_text, prefix="💖")
+
+                # Save user message to Supabase once
                 user_msg_payload = {
                     "id": msg_id,
                     "author": author,
                     "content": message,
                     "language": detected_lang,
                 }
+                # 🔹 If message is from the channel owner, do NOT trigger AI reply
+                # 1) If message is from channel owner,
+                #    do NOT save to DB and do NOT trigger AI reply.
+                if is_owner:
+                    # You *may* still want to broadcast it to frontend, so the dashboard sees your messages
+                    await broadcast_message(user_msg_payload)
+                    continue  # skip reply + DB for owner
                 save_message_to_supabase(user_msg_payload)
 
-                # Respect global cooldown for bot replies
+                # Respect bot reply cooldown for normal chat replies
                 now = time.time()
-                if now - last_bot_post_time < BOT_COOLDOWN_SECONDS:
+                if not addressed_bot and (now - last_bot_post_time < BOT_COOLDOWN_SECONDS):
                     # Still broadcast user message to frontend even if bot stays silent
                     await broadcast_message(user_msg_payload)
                     continue
