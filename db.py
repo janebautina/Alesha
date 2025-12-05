@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 db.py — single place for working with Supabase:
-- initialization of client
+- initialization of the client
 - management of streamers
 - management of subscribers
 - saving messages
@@ -20,8 +20,8 @@ _supabase: Optional[Client] = None
 
 def get_supabase() -> Optional[Client]:
     """
-    Возвращает общий Supabase-клиент.
-    Если не удалось инициализировать — вернёт None.
+    Return a shared Supabase client.
+    If initialization fails, returns None.
     """
     global _supabase
     if _supabase is not None:
@@ -51,10 +51,12 @@ def get_or_create_streamer(
     email: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Find or create streamer.
+    Find or create a streamer row.
 
-    external_id — external ID of the streamer (can use something simple for now:
-    'default_youtube_streamer', later — Google / Telegram / YouTube id).
+    external_id:
+        Generic external ID for the streamer. For now this can be something
+        simple like 'default_youtube_streamer'. Later it can be YouTube channel
+        ID, Telegram ID, or an auth.users.id mapping.
     """
     client = get_supabase()
     if client is None:
@@ -103,10 +105,12 @@ def get_or_create_subscriber(
     display_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Find or create subscriber for a specific streamer.
+    Find or create a subscriber for a specific streamer.
 
-    streamer_id      — id streamer (FK on streamers table)
-    external_user_id — external ID of the user (e.g. YouTube channelId)
+    streamer_id:
+        UUID of the streamer (FK to streamers.id)
+    external_user_id:
+        External ID of the user (e.g. YouTube channelId).
     """
     client = get_supabase()
     if client is None:
@@ -132,8 +136,9 @@ def get_or_create_subscriber(
             "external_user_id": external_user_id,
             "platform": platform,
         }
+        # In the current schema the column is `username`
         if display_name is not None:
-            insert_data["display_name"] = display_name
+            insert_data["username"] = display_name
 
         resp = client.table("subscribers").insert(insert_data).execute()
         rows = resp.data or []
@@ -153,17 +158,17 @@ def get_or_create_subscriber(
 
 def save_message_to_supabase(message_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Save message to public.messages table.
+    Save a message into public.messages.
 
-    Expected fields in input dict (some can be not passed):
-        - id / message_id  (any one, we will convert to message_id)
-        - author           (str)
-        - content          (str)
-        - language         (str)
-        - timestamp        (float) — if not, set time.time()
-        - platform         (str)   — if not, 'youtube'
-        - streamer_id      (uuid|None) — optional
-        - subscriber_id    (uuid|None) — optional
+    Expected fields in `message_data` (some are optional):
+        - id / message_id      (one of them must be present; used as message_id)
+        - author               (str)
+        - content              (str)
+        - language             (str)
+        - timestamp            (float) — if missing, time.time() will be used
+        - platform             (str)   — default 'youtube'
+        - streamer_id          (uuid|None) — optional FK to streamers.id
+        - subscriber_id        (uuid|None) — optional FK to subscribers.id
     """
     client = get_supabase()
     if client is None:
@@ -191,7 +196,7 @@ def save_message_to_supabase(message_data: Dict[str, Any]) -> Optional[Dict[str,
             "subscriber_id": subscriber_id,
         }
 
-        # убираем None, чтобы не было проблем, если какие-то поля не нужны
+        # Drop None values so we do not send nulls for irrelevant fields
         insert_row = {k: v for k, v in row.items() if v is not None}
 
         resp = client.table("messages").insert(insert_row).execute()

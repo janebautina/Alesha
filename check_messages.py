@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-check_messages.py — утилита для просмотра последних сообщений из Supabase
+check_messages.py — utility for viewing recent messages from Supabase.
 
-Shows last N rows from public.messages table.
+Shows the last N rows from the public.messages table.
 """
 
-from typing import Optional
-from db import get_supabase  # ✅ используем общий Supabase-клиент
+from db import get_supabase
 
 
 def show_recent_messages(limit: int = 20) -> None:

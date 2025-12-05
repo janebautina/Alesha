@@ -1,44 +1,68 @@
 #!/usr/bin/env python3
 """
-Standalone Supabase connection test
+Standalone Supabase connection test.
+
+- Loads config.json implicitly via db.get_supabase()
+- Verifies connection to Supabase
+- Checks that the messages table is accessible
+- Inserts a test row into messages and then deletes it
 """
 
-import json
-from supabase.client import create_client
+from typing import Optional
+from db import get_supabase
 
-# Load config
-with open("config.json") as f:
-    config = json.load(f)
 
-url = config["SUPABASE_URL"]
-key = config["SUPABASE_KEY"]
+def test_standalone_supabase() -> bool:
+    client = get_supabase()
+    if client is None:
+        print("🚫 Supabase client is not initialized. Check config.json (SUPABASE_URL / SUPABASE_KEY).")
+        return False
 
-print(f"🔗 Testing connection to: {url}")
-print(f"🔑 Using key: {key[:10]}...")
+    try:
+        print("🔗 Testing connection to Supabase using db.get_supabase()...")
 
-supabase = create_client(url, key)
+        # 1) Simple SELECT from messages
+        result = client.table("messages").select("*").limit(1).execute()
+        print(f"✅ 'messages' table is accessible. Sample row count: {len(result.data)}")
 
-# Test fetching or inserting
-try:
-    result = supabase.table("messages").select("*").limit(1).execute()
-    print("✅ Supabase connected. Sample data:", result.data)
-    
-    # Test inserting a sample message
-    test_data = {
-        "message_id": "test_standalone_123",
-        "author": "Test User",
-        "content": "This is a standalone test message",
-        "language": "en",
-        "timestamp": 1234567890.0,
-        "platform": "youtube"
-    }
-    
-    insert_result = supabase.table("messages").insert(test_data).execute()
-    print("✅ Test message inserted successfully!")
-    
-    # Clean up test data
-    supabase.table("messages").delete().eq("message_id", "test_standalone_123").execute()
-    print("✅ Test data cleaned up!")
-    
-except Exception as e:
-    print("❌ Test Supabase call failed:", e) 
+        # 2) Insert a test message
+        test_message_id = "test_standalone_123"
+
+        # Clean up any previous test row with the same message_id (idempotent)
+        try:
+            client.table("messages").delete().eq("message_id", test_message_id).execute()
+        except Exception:
+            # If delete fails, we ignore it here
+            pass
+
+        test_data = {
+            "message_id": test_message_id,
+            "author": "Standalone Test User",
+            "content": "This is a standalone test message",
+            "language": "en",
+            "timestamp": 1234567890.0,
+            "platform": "youtube",
+        }
+
+        insert_result = client.table("messages").insert(test_data).execute()
+        print("✅ Test message inserted successfully!")
+        print(f"🆔 Inserted row: {insert_result.data}")
+
+        # 3) Clean up test data
+        print("🧹 Cleaning up test data...")
+        client.table("messages").delete().eq("message_id", test_message_id).execute()
+        print("✅ Test data cleaned up!")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Standalone Supabase test failed: {e}")
+        return False
+
+
+if __name__ == "__main__":
+    ok = test_standalone_supabase()
+    if ok:
+        print("🎉 Standalone Supabase test completed successfully.")
+    else:
+        print("🚨 Standalone test failed. Check logs above and your database setup.")

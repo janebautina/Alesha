@@ -14,7 +14,7 @@ from openai import OpenAI
 import websockets
 
 from persona import get_system_prompt_for_lang
-from db import save_message_to_supabase  # shared DB helper
+from db import get_supabase, save_message_to_supabase  # shared DB helpers
 
 # -------- Config loading --------
 with open("config.json") as f:
@@ -29,41 +29,37 @@ connected_clients = set()
 
 MAX_YT_MESSAGE_LEN = 200
 
-# -------- Payment / donations config (edit these for your real data) --------
+# -------- Payment / donations config (DB-backed) --------
+
 GRATITUDE_COOLDOWN_SECONDS = 600  # 10 minutes shared cooldown for likes + donations
 LIKE_CHECK_INTERVAL = 60  # seconds to poll like count
 
 # How often to show donation info (text-based donations for users without SuperChat)
 DONATION_INFO_INTERVAL_SECONDS = 600  # 10 minutes
 
-# TODO: replace these placeholders with your real data
-DONATION_CARD_TEXT = "**** **** **** ****"  # your card number / bank details
-PAYPAL_LINK = "https://paypal.me/your_link"  # your PayPal.me link
-DONATIONALERTS_URL = "https://www.donationalerts.com/r/your_channel"  # your DonationAlerts link
+# These will be overridden from DB (streamer_settings), but we keep safe defaults
+DONATION_CARD_TEXT = ""  # full card number comes only from DB
+BUYMEACOFFEE_LINK = ""
+DONATIONALERTS_URL = ""
 
-DONATION_INFO_TEXT = (
-    "Хочешь поддержать стрим или заказать музыку? 🎵 "
-    f"Карта: {DONATION_CARD_TEXT} | PayPal: {PAYPAL_LINK} | DonationAlerts: {DONATIONALERTS_URL}. "
-    "Один трек — 250₽."
-)
-# how often we show promo/CTA messages (in seconds)
+# How often we show promo/CTA messages (in seconds)
 PROMO_INTERVAL_SECONDS = 480  # ~8 minutes
 
 PROMO_MESSAGES_RU = [
-    "Ставим лайки, подписываемся на канал и заказываем песни! 🎵",
-    "Лайк, подписка и твой трек за 250₽ — залетаем в плейлист! 💖",
-    "Кому музыку? Пишем в чат, ставим лайк и подписку, чтобы не пропустить стримы! 🎧",
-    "Поддержи стрим лайком и подпиской — и заказывай любимый трек за 250₽. 🎶",
+    "🎵 Ставим лайки, подписываемся на канал и заказываем песни! 🎵",
+    "💖 Лайк, подписка и твой трек за 250₽ — залетаем в плейлист! 💖",
+    "🎧 Кому музыку? Пишем в чат, ставим лайк и подписку, чтобы не пропустить стримы! 🎧",
+    "🎶 Поддержи стрим лайком и подпиской — и заказывай любимый трек за 250₽. 🎶",
 ]
 
 PROMO_MESSAGES_EN = [
-    "Drop a like, hit subscribe and request your song in the chat! 🎵",
-    "Like, subscribe and your track for 250₽ (or equivalent) — let’s put it in the playlist! 💖",
-    "Want music? Write in chat, leave a like and subscribe so you don’t miss the streams! 🎧",
-    "Support the stream with a like & sub — and request your favorite track for 250₽. 🎶",
+    "🎵 Drop a like, hit subscribe and request your song in the chat! 🎵",
+    "💖 Like, subscribe and your track for 250₽ (or equivalent) — let’s put it in the playlist! 💖",
+    "🎧 Want music? Write in chat, leave a like and subscribe so you don’t miss the streams! 🎧",
+    "🎶 Support the stream with a like & sub — and request your favorite track for 250₽. 🎶",
 ]
 
-last_promo_time = 0
+last_promo_time = 0.0
 last_seen_lang_code = "ru"  # used to pick RU vs EN promo
 
 # -------- Globals --------
@@ -85,11 +81,11 @@ processed_message_ids = deque(maxlen=MAX_TRACKED_MESSAGES)
 processed_message_ids_set: set[str] = set()
 next_page_token = None
 
-# counter for "super-fun" mode
+# Counter for "super-fun" mode
 message_counter = 0
 next_funny_in = random.randint(3, 5)
 
-# likes and gratitude state
+# Likes and gratitude state
 seen_authors = set()
 last_like_check_time = 0.0
 last_like_count: int | None = None
@@ -131,6 +127,7 @@ MENTION_KEYWORDS = [
     "@californicationru ",  # YouTube sometimes adds a trailing space after the username
 ]
 
+
 def initialize_chat_ids():
     """Initialize LIVE_CHAT_ID and LIVE_STREAM_ID from environment variables."""
     global LIVE_CHAT_ID, LIVE_STREAM_ID
@@ -139,7 +136,83 @@ def initialize_chat_ids():
     return LIVE_CHAT_ID, LIVE_STREAM_ID
 
 
+# -------- Payment settings loader (from DB) --------
+
+def load_payment_settings_from_db() -> None:
+    """
+    Load payment settings (card, BuyMeACoffee, DonationAlerts) from public.streamer_settings.
+
+    For now we simply take the first row from streamer_settings.
+    Later we can bind this to a specific streamer_id.
+    """
+    global DONATION_CARD_TEXT, BUYMEACOFFEE_LINK, DONATIONALERTS_URL
+
+    client = get_supabase()
+    if client is None:
+        print("🚫 Supabase client is not initialized, using default payment settings.")
+        return
+
+    try:
+        resp = (
+            client.table("streamer_settings")
+            .select("card_number_full, buymeacoffee_link, donation_alerts_link")
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            print("ℹ️ No streamer_settings rows found, using default payment settings.")
+            return
+
+        row = rows[0]
+
+        card = row.get("card_number_full") or ""
+        bmc = row.get("buymeacoffee_link") or ""
+        alerts = row.get("donation_alerts_link") or ""
+
+        if card:
+            DONATION_CARD_TEXT = card
+        if bmc:
+            BUYMEACOFFEE_LINK = bmc
+        if alerts:
+            DONATIONALERTS_URL = alerts
+
+        print("✅ Loaded payment settings from DB.")
+        print(f"   card_number_full: {'set' if card else 'empty'}")
+        print(f"   buymeacoffee_link: {BUYMEACOFFEE_LINK or 'empty'}")
+        print(f"   donation_alerts_link: {DONATIONALERTS_URL or 'empty'}")
+
+    except Exception as e:
+        print(f"⚠ Failed to load payment settings from DB: {e}")
+        print("ℹ️ Using default (empty) payment settings.")
+
+
+def build_donation_info_text() -> str:
+    """
+    Build donation info text dynamically based on the current
+    DONATION_CARD_TEXT / BUYMEACOFFEE_LINK / DONATIONALERTS_URL values.
+    """
+    parts: list[str] = []
+
+    if DONATION_CARD_TEXT:
+        parts.append(f"Карта: {DONATION_CARD_TEXT}")
+    if BUYMEACOFFEE_LINK:
+        parts.append(f"BuyMeACoffee: {BUYMEACOFFEE_LINK}")
+    if DONATIONALERTS_URL:
+        parts.append(f"DonationAlerts: {DONATIONALERTS_URL}")
+
+    middle = " | ".join(parts) if parts else ""
+    base = "Хочешь поддержать стрим или заказать музыку? 🎵 "
+
+    if middle:
+        base += middle + ". "
+
+    base += "Один трек — 250₽."
+    return base
+
+
 # -------- WebSocket handling --------
+
 async def handler(websocket):
     print("🔌 New client connected")
     connected_clients.add(websocket)
@@ -166,6 +239,7 @@ async def broadcast_message(message_dict):
 
 
 # -------- Language / translation helpers --------
+
 def detect_language(text: str) -> str:
     """Detect language code using langdetect, fallback to 'unknown'."""
     try:
@@ -211,6 +285,7 @@ def translate_message(message: str, source_language: str):
 
 
 # -------- YouTube chat helpers --------
+
 def build_chat_text(prefix: str, text: str) -> str:
     """
     Build final YouTube chat message with prefix and enforce length limit.
@@ -301,6 +376,7 @@ def maybe_send_gratitude(text: str, prefix: str = "💖") -> None:
 
 
 # -------- AI reply generation --------
+
 def generate_alesha_reply(
     original_message: str,
     translated_ru: str,
@@ -315,7 +391,7 @@ def generate_alesha_reply(
     global last_request_time
 
     try:
-        # simple rate limiting to avoid hammering OpenAI
+        # Simple rate limiting to avoid hammering OpenAI
         if time.time() - last_request_time < 2:
             time.sleep(2)
 
@@ -377,12 +453,13 @@ def generate_alesha_reply(
 
 
 # -------- Main loop --------
+
 async def fetch_and_process_messages():
     """
     Main loop:
     - periodically checks likes and (if cooldown allows) sends thank-you messages;
     - periodically sends promo/CTA messages (likes + subscribe + music orders);
-    - periodically sends donation-info text (card, PayPal, DonationAlerts);
+    - periodically sends donation-info text (card, BuyMeACoffee, DonationAlerts);
     - reads new messages from YouTube;
     - stores each user message in Supabase (except channel-owner messages);
     - replies no more often than BOT_COOLDOWN_SECONDS (unless bot is mentioned explicitly);
@@ -404,7 +481,7 @@ async def fetch_and_process_messages():
 
                 if like_count is not None:
                     if last_like_count is None:
-                        # first initialization — just store current like count
+                        # First initialization — just store current like count
                         last_like_count = like_count
                     elif like_count > last_like_count:
                         diff = like_count - last_like_count
@@ -425,14 +502,14 @@ async def fetch_and_process_messages():
                                 f"Уже {like_count}, я в восторге."
                             )
 
-                        # likes use shared gratitude cooldown (likes + donations + donation-info)
+                        # Likes use shared gratitude cooldown (likes + donations + donation-info)
                         maybe_send_gratitude(text, prefix="💖")
 
             # 2) Periodically send promo/CTA message (likes + subscribe + music orders) in RU/EN
             if now - last_promo_time > PROMO_INTERVAL_SECONDS:
-                # respect global reply cooldown so the bot does not spam
+                # Respect global reply cooldown so the bot does not spam
                 if time.time() - last_bot_post_time >= BOT_COOLDOWN_SECONDS:
-                    # choose language: Russian by default, English otherwise
+                    # Choose language: Russian by default, English otherwise
                     lang_code = (last_seen_lang_code or "ru").lower()
                     if lang_code.startswith("ru"):
                         promo_pool = PROMO_MESSAGES_RU
@@ -443,10 +520,10 @@ async def fetch_and_process_messages():
                     send_message_to_chat(promo_text, prefix="📣")
                     last_promo_time = time.time()
 
-            # 3) Periodically show donation info (card + PayPal + DonationAlerts) using shared cooldown
+            # 3) Periodically show donation info (card + BuyMeACoffee + DonationAlerts) using shared cooldown
             if now - last_donation_info_time > DONATION_INFO_INTERVAL_SECONDS:
-                # donation-info also uses the same gratitude cooldown internally
-                maybe_send_gratitude(DONATION_INFO_TEXT, prefix="💸")
+                donation_text = build_donation_info_text()
+                maybe_send_gratitude(donation_text, prefix="💸")
                 last_donation_info_time = now
 
             # 4) Read new messages from YouTube Live Chat
@@ -464,7 +541,7 @@ async def fetch_and_process_messages():
                 if msg_id in processed_message_ids_set:
                     continue
 
-                # maintain a sliding window of processed message IDs
+                # Maintain a sliding window of processed message IDs
                 if len(processed_message_ids) >= MAX_TRACKED_MESSAGES:
                     old_id = processed_message_ids.popleft()
                     processed_message_ids_set.discard(old_id)
@@ -479,7 +556,7 @@ async def fetch_and_process_messages():
                 author = author_details.get("displayName", "Unknown")
                 detected_lang = detect_language(message)
 
-                # track last seen language to choose promo language (RU/EN)
+                # Track last seen language to choose promo language (RU/EN)
                 if detected_lang and detected_lang != "unknown":
                     last_seen_lang_code = detected_lang.lower()
 
@@ -505,7 +582,7 @@ async def fetch_and_process_messages():
                             f"Thank you so much for your support, {donor_name}! 💖"
                         )
 
-                    # uses the same 10-min gratitude cooldown as likes
+                    # Uses the same 10-min gratitude cooldown as likes
                     maybe_send_gratitude(donation_text, prefix="💖")
 
                 # 4b) Save *user* message to Supabase once
@@ -518,7 +595,7 @@ async def fetch_and_process_messages():
 
                 # If message is from the channel owner, do NOT save to DB and do NOT trigger AI reply.
                 if is_owner:
-                    # optional: still broadcast owner messages to frontend
+                    # Optional: still broadcast owner messages to frontend
                     await broadcast_message(user_msg_payload)
                     continue  # skip DB + AI reply for owner
 
@@ -527,7 +604,7 @@ async def fetch_and_process_messages():
                 # 4c) Respect bot reply cooldown for normal chat replies
                 now = time.time()
                 if not addressed_bot and (now - last_bot_post_time < BOT_COOLDOWN_SECONDS):
-                    # still broadcast user message to frontend even if bot stays silent
+                    # Still broadcast user message to frontend even if bot stays silent
                     await broadcast_message(user_msg_payload)
                     continue
 
@@ -549,12 +626,12 @@ async def fetch_and_process_messages():
                 prefix = "🎉" if is_funny else "💬"
                 send_message_to_chat(reply_text, prefix=prefix)
 
-                # reset funny counter if we just did a super-funny one
+                # Reset funny counter if we just did a super-funny one
                 if is_funny:
                     message_counter = 0
                     next_funny_in = random.randint(3, 5)
 
-                # broadcast original user message to frontend
+                # Broadcast original user message to frontend
                 await broadcast_message(user_msg_payload)
 
             await asyncio.sleep(polling_interval)
@@ -564,9 +641,10 @@ async def fetch_and_process_messages():
             await asyncio.sleep(5)
 
 
-
 async def main():
     print("🚀 Alesha is running with integrated WebSocket server")
+    # Load payment settings once at startup
+    load_payment_settings_from_db()
     async with websockets.serve(handler, "localhost", 8765):
         await fetch_and_process_messages()
 
